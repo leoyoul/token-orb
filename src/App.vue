@@ -683,8 +683,10 @@ const rankingModelUsageRequestEpochs = new Map<string, number>()
 let modelRankingRefreshEpoch = 0
 let unlistenMoved: (() => void) | null = null
 let unlistenSettingsChanged: (() => void) | null = null
+let unlistenPlatformUpdateCheck: (() => void) | null = null
 let tauriWindowApi: TauriWindowApi | null = null
 let floatingWindowInitialized = false
+let checkingPlatformUpdate = false
 let collapsedDragStarted = false
 let collapsedDragStartAt = 0
 
@@ -1164,13 +1166,34 @@ async function checkForAppUpdate() {
 }
 
 async function checkPlatformUpdate() {
-  if ((!isPlatformView && !isTrayMenuView) || !('__TAURI_INTERNALS__' in window)) return
+  if ((!isPlatformView && !isTrayMenuView) || !('__TAURI_INTERNALS__' in window) || checkingPlatformUpdate) return
+  checkingPlatformUpdate = true
   try {
     const { check } = await import('@tauri-apps/plugin-updater')
     platformUpdateAvailable.value = (await check()) !== null
   } catch {
     platformUpdateAvailable.value = false
+  } finally {
+    checkingPlatformUpdate = false
   }
+}
+
+async function listenForPlatformUpdateChecks() {
+  if (!isPlatformView || !('__TAURI_INTERNALS__' in window)) return
+  try {
+    const { listen } = await import('@tauri-apps/api/event')
+    unlistenPlatformUpdateCheck = await listen('token-orb-check-platform-update', () => {
+      void checkPlatformUpdate()
+    })
+  } catch {
+    // 首次挂载仍会检测；事件监听失败只影响窗口再次显示时的自动重检。
+  }
+}
+
+async function initRuntimeListenersAndUpdateStatus() {
+  await listenForSettingsChanges()
+  await listenForPlatformUpdateChecks()
+  await checkPlatformUpdate()
 }
 
 async function runTrayCommand(command: 'monitor' | 'settings' | 'update' | 'quit') {
@@ -1598,9 +1621,8 @@ onMounted(() => {
   }
   void initAppVersion()
   scheduleRefresh()
-  void listenForSettingsChanges()
   void refreshAll()
-  void checkPlatformUpdate()
+  void initRuntimeListenersAndUpdateStatus()
   void initFloatingWindow()
   void resizePlatformWindowToContent()
 })
@@ -1619,5 +1641,6 @@ onBeforeUnmount(() => {
   if (saveMessageTimer !== null) window.clearTimeout(saveMessageTimer)
   if (unlistenMoved) unlistenMoved()
   if (unlistenSettingsChanged) unlistenSettingsChanged()
+  if (unlistenPlatformUpdateCheck) unlistenPlatformUpdateCheck()
 })
 </script>

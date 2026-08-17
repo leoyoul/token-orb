@@ -4,11 +4,12 @@ import App from './App.vue'
 import { settingsStorageKey, type AppSettings } from '@/domain/settings'
 import { fetchAdminModelUsageRanking, fetchAdminModelUserUsage, fetchAdminMonitorMetrics, fetchAdminUserModelUsage, fetchSub2apiMetrics } from '@/domain/sub2apiClient'
 
-const { checkForAvailableUpdate, emitTauriEvent, getSettingsUpdatedListener, getAppVersion, hidePersonalFloatingOrb, invokeTauriCommand, listenTauriEvent, openReleaseNotes, resetSettingsUpdatedListener, tauriWindow } = vi.hoisted(() => {
+const { checkForAvailableUpdate, emitTauriEvent, getPlatformUpdateCheckListener, getSettingsUpdatedListener, getAppVersion, hidePersonalFloatingOrb, invokeTauriCommand, listenTauriEvent, openReleaseNotes, resetTauriEventListeners, tauriWindow } = vi.hoisted(() => {
+  let platformUpdateCheckListener: (() => void) | undefined
   let settingsUpdatedListener: (() => void) | undefined
   const checkForAvailableUpdate = vi.fn<() => Promise<{ body: string; version: string } | null>>(async () => ({
     body: '修复平台更新提示',
-    version: '0.4.2'
+    version: '0.4.4'
   }))
   const hidePersonalFloatingOrb = vi.fn()
   const getAppVersion = vi.fn(async () => '0.4.3')
@@ -18,6 +19,9 @@ const { checkForAvailableUpdate, emitTauriEvent, getSettingsUpdatedListener, get
   const listenTauriEvent = vi.fn(async (eventName: string, listener: () => void) => {
     if (eventName === 'token-orb-settings-updated') {
       settingsUpdatedListener = listener
+    }
+    if (eventName === 'token-orb-check-platform-update') {
+      platformUpdateCheckListener = listener
     }
     return vi.fn()
   })
@@ -35,13 +39,15 @@ const { checkForAvailableUpdate, emitTauriEvent, getSettingsUpdatedListener, get
   return {
     checkForAvailableUpdate,
     emitTauriEvent,
+    getPlatformUpdateCheckListener: () => platformUpdateCheckListener,
     getSettingsUpdatedListener: () => settingsUpdatedListener,
     getAppVersion,
     hidePersonalFloatingOrb,
     invokeTauriCommand,
     listenTauriEvent,
     openReleaseNotes,
-    resetSettingsUpdatedListener: () => {
+    resetTauriEventListeners: () => {
+      platformUpdateCheckListener = undefined
       settingsUpdatedListener = undefined
     },
     tauriWindow
@@ -140,7 +146,7 @@ describe('App settings sync', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.clearAllMocks()
-    resetSettingsUpdatedListener()
+    resetTauriEventListeners()
     vi.stubGlobal('localStorage', localStorageMock)
     Object.defineProperty(window, 'localStorage', { configurable: true, value: localStorageMock })
     localStorage.clear()
@@ -345,6 +351,33 @@ describe('App settings sync', () => {
     expect(version.find('.platform-version__update-dot').exists()).toBe(false)
   })
 
+  it('rechecks the platform version when the existing window is shown again', async () => {
+    checkForAvailableUpdate
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ body: '修复平台更新提示', version: '0.4.4' })
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: {} })
+    localStorage.setItem(settingsStorageKey, JSON.stringify(baseSettings))
+    const wrapper = mount(App)
+    await flushPromises()
+
+    expect(wrapper.find('.platform-version--available').exists()).toBe(false)
+    await vi.waitFor(() => {
+      expect(listenTauriEvent).toHaveBeenCalledWith(
+        'token-orb-check-platform-update',
+        expect.any(Function)
+      )
+    })
+    const platformUpdateCheckListener = getPlatformUpdateCheckListener()
+    platformUpdateCheckListener?.()
+    await flushPromises()
+
+    expect(checkForAvailableUpdate).toHaveBeenCalledTimes(2)
+    expect(emitTauriEvent).not.toHaveBeenCalledWith('token-orb-open-update')
+    const version = wrapper.get('.platform-version--available')
+    expect(version.attributes('title')).toBe('发现新版本，点击更新')
+    expect(version.find('.platform-version__update-dot').exists()).toBe(true)
+  })
+
   it('emits the native update event after clicking the platform version update button', async () => {
     Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: {} })
     localStorage.setItem(settingsStorageKey, JSON.stringify(baseSettings))
@@ -366,7 +399,7 @@ describe('App settings sync', () => {
     await wrapper.get('.update-release-notes').trigger('click')
     await flushPromises()
 
-    expect(openReleaseNotes).toHaveBeenCalledWith('https://github.com/tangjiale/token-orb/releases/tag/v0.4.2')
+    expect(openReleaseNotes).toHaveBeenCalledWith('https://github.com/tangjiale/token-orb/releases/tag/v0.4.4')
   })
 
   it('resizes the updater window to show the complete update notes', async () => {

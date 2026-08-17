@@ -177,6 +177,7 @@ fn toggle_monitor<R: Runtime>(app: &AppHandle<R>, tray_rect: Option<tauri::Rect>
             position_monitor(app, &window, tray_rect);
             let _ = window.show();
             let _ = window.set_focus();
+            let _ = window.emit("token-orb-check-platform-update", ());
         }
         return;
     }

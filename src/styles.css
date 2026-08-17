@@ -647,12 +647,17 @@ button.platform-version {
   cursor: pointer;
 }
 
-.platform-version--available {
-  color: #94a3b8;
+button.platform-version--available {
+  border: 1px solid rgba(245, 158, 11, 0.55);
+  border-radius: 5px;
+  background: rgba(245, 158, 11, 0.14);
+  color: #fbbf24;
+  padding: 5px 7px;
 }
 
-.platform-version--available:hover {
-  color: #fff;
+button.platform-version--available:hover {
+  background: rgba(245, 158, 11, 0.22);
+  color: #fcd34d;
 }
 
 .platform-version__update-dot {
