@@ -31,7 +31,7 @@ import {
   parseUserRanking,
   parseUsers
 } from './tokenMetrics'
-import { buildRealtimeUrl, fetchAdminMonitorMetrics, fetchSub2apiMetrics } from './sub2apiClient'
+import { buildRealtimeUrl, fetchAdminMonitorMetrics, fetchAdminUserModelUsage, fetchSub2apiMetrics } from './sub2apiClient'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -338,6 +338,32 @@ describe('tokenMetrics', () => {
     expect(buildRealtimeUrl('http://127.0.0.1/api/v1/admin/groups/capacity-summary', 1710000000000)).toBe(
       'http://127.0.0.1/api/v1/admin/groups/capacity-summary?_ts=1710000000000'
     )
+  })
+
+  it('requests ranking user model usage for the current local date', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-03-16T09:00:00.000Z'))
+    let requestedUrl = ''
+    Reflect.deleteProperty(window, '__TAURI_INTERNALS__')
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL) => {
+      requestedUrl = String(url)
+      return new Response(JSON.stringify({ data: { models: [] } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    }))
+
+    await fetchAdminUserModelUsage({
+      baseUrl: 'http://127.0.0.1:8081',
+      apiKey: 'admin-key'
+    }, 987)
+
+    const url = new URL(requestedUrl)
+    expect(url.pathname).toBe('/api/v1/admin/dashboard/models')
+    expect(url.searchParams.get('start_date')).toBe('2026-03-16')
+    expect(url.searchParams.get('end_date')).toBe('2026-03-16')
+    expect(url.searchParams.get('timezone')).toBeTruthy()
+    expect(url.searchParams.get('user_id')).toBe('987')
   })
 
   it('requests full admin account records so account details can show today requests and tokens', async () => {

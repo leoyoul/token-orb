@@ -866,7 +866,7 @@ describe('App settings sync', () => {
     expect(modelRows()[1].text()).toContain('高用量模型')
   })
 
-  it('keeps an expanded ranking user open while refreshing metrics', async () => {
+  it('keeps an expanded ranking user open and refreshes its model usage with the metrics', async () => {
     const metrics = {
       todayTotalTokens: 15000000,
       todayTotalCost: 3.5,
@@ -878,7 +878,7 @@ describe('App settings sync', () => {
       poolAccountDetails: [],
       userRanking: [{
         rank: 1,
-        userId: 1,
+        userId: 987,
         name: '模型用户',
         email: 'models@example.com',
         displayName: '模型用户（models@example.com）',
@@ -888,9 +888,14 @@ describe('App settings sync', () => {
       updatedAt: '2026-03-16T09:00:00.000Z'
     } as Awaited<ReturnType<typeof fetchAdminMonitorMetrics>>
     vi.mocked(fetchAdminMonitorMetrics).mockResolvedValue(metrics)
-    vi.mocked(fetchAdminUserModelUsage).mockResolvedValue([
-      { model: '模型A', requests: 12, tokens: 1200000, actualCost: 0.6 }
-    ])
+    let userModelRequestCount = 0
+    vi.mocked(fetchAdminUserModelUsage).mockImplementation(async (_config, userId) => {
+      if (userId !== 987) return []
+      userModelRequestCount += 1
+      return userModelRequestCount === 1
+        ? [{ model: '旧模型', requests: 12, tokens: 1200000, actualCost: 0.6 }]
+        : [{ model: '今日模型', requests: 18, tokens: 1800000, actualCost: 0.9 }]
+    })
     localStorage.setItem(settingsStorageKey, JSON.stringify(baseSettings))
     const wrapper = mount(App)
     await flushPromises()
@@ -899,16 +904,19 @@ describe('App settings sync', () => {
     await flushPromises()
     expect(wrapper.get('button.ranking-row').attributes('aria-expanded')).toBe('true')
     expect(wrapper.find('.ranking-model-list').exists()).toBe(true)
+    expect(wrapper.text()).toContain('旧模型')
 
     await vi.advanceTimersByTimeAsync(baseSettings.refreshSeconds * 1000)
     await flushPromises()
 
+    expect(vi.mocked(fetchAdminUserModelUsage).mock.calls.filter(([, userId]) => userId === 987)).toHaveLength(2)
     expect(wrapper.get('button.ranking-row').attributes('aria-expanded')).toBe('true')
     expect(wrapper.find('.ranking-model-list').exists()).toBe(true)
-    expect(wrapper.text()).toContain('模型A')
+    expect(wrapper.text()).toContain('今日模型')
+    expect(wrapper.text()).not.toContain('旧模型')
   })
 
-  it('finishes a slow expanded user model request after the periodic ranking refresh', async () => {
+  it('retries a failed ranking user model request when the row is expanded again', async () => {
     const metrics = {
       todayTotalTokens: 15000000,
       todayTotalCost: 3.5,
@@ -921,6 +929,50 @@ describe('App settings sync', () => {
       userRanking: [{
         rank: 1,
         userId: 1,
+        name: '重试用户',
+        email: 'retry@example.com',
+        displayName: '重试用户（retry@example.com）',
+        tokens: 15000000,
+        actualCost: 3.5
+      }],
+      updatedAt: '2026-03-16T09:00:00.000Z'
+    } as Awaited<ReturnType<typeof fetchAdminMonitorMetrics>>
+    vi.mocked(fetchAdminMonitorMetrics).mockResolvedValue(metrics)
+    vi.mocked(fetchAdminUserModelUsage)
+      .mockRejectedValueOnce(new Error('temporary failure'))
+      .mockResolvedValueOnce([
+        { model: '重试成功模型', requests: 3, tokens: 300000, actualCost: 0.15 }
+      ])
+    localStorage.setItem(settingsStorageKey, JSON.stringify(baseSettings))
+    const wrapper = mount(App)
+    await flushPromises()
+
+    await wrapper.get('button.ranking-row').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('模型用量加载失败')
+
+    await wrapper.get('button.ranking-row').trigger('click')
+    await wrapper.get('button.ranking-row').trigger('click')
+    await flushPromises()
+
+    expect(fetchAdminUserModelUsage).toHaveBeenCalledTimes(2)
+    expect(wrapper.text()).toContain('重试成功模型')
+    expect(wrapper.text()).not.toContain('模型用量加载失败')
+  })
+
+  it('keeps the refreshed model usage when an older expanded user request finishes later', async () => {
+    const metrics = {
+      todayTotalTokens: 15000000,
+      todayTotalCost: 3.5,
+      poolRemainingPercent: null,
+      poolLatestResetAt: null,
+      poolResetItems: [],
+      poolAccounts: null,
+      poolCapacity: null,
+      poolAccountDetails: [],
+      userRanking: [{
+        rank: 1,
+        userId: 654,
         name: '慢查询用户',
         email: 'slow@example.com',
         displayName: '慢查询用户（slow@example.com）',
@@ -929,11 +981,20 @@ describe('App settings sync', () => {
       }],
       updatedAt: '2026-03-16T09:00:00.000Z'
     } as Awaited<ReturnType<typeof fetchAdminMonitorMetrics>>
-    let resolveModels: ((models: Awaited<ReturnType<typeof fetchAdminUserModelUsage>>) => void) | undefined
+    let resolveOldModels: ((models: Awaited<ReturnType<typeof fetchAdminUserModelUsage>>) => void) | undefined
+    let resolveTodayModels: ((models: Awaited<ReturnType<typeof fetchAdminUserModelUsage>>) => void) | undefined
     vi.mocked(fetchAdminMonitorMetrics).mockResolvedValue(metrics)
-    vi.mocked(fetchAdminUserModelUsage).mockImplementationOnce(() => new Promise((resolve) => {
-      resolveModels = resolve
-    }))
+    vi.mocked(fetchAdminUserModelUsage).mockImplementation((_config, userId) => {
+      if (userId !== 654) return Promise.resolve([])
+      if (!resolveOldModels) {
+        return new Promise((resolve) => {
+          resolveOldModels = resolve
+        })
+      }
+      return new Promise((resolve) => {
+        resolveTodayModels = resolve
+      })
+    })
     localStorage.setItem(settingsStorageKey, JSON.stringify(baseSettings))
     const wrapper = mount(App)
     await flushPromises()
@@ -944,11 +1005,16 @@ describe('App settings sync', () => {
 
     await vi.advanceTimersByTimeAsync(baseSettings.refreshSeconds * 1000)
     await flushPromises()
-    resolveModels?.([{ model: 'gpt-5.6-sol', requests: 4, tokens: 14090000, actualCost: 2.52 }])
+    expect(vi.mocked(fetchAdminUserModelUsage).mock.calls.filter(([, userId]) => userId === 654)).toHaveLength(2)
+
+    resolveTodayModels?.([{ model: '今日模型', requests: 4, tokens: 14090000, actualCost: 2.52 }])
+    await flushPromises()
+    resolveOldModels?.([{ model: '昨日模型', requests: 40, tokens: 115360000, actualCost: 87.6 }])
     await flushPromises()
 
     expect(wrapper.text()).not.toContain('加载模型用量中...')
-    expect(wrapper.text()).toContain('gpt-5.6-sol')
+    expect(wrapper.text()).toContain('今日模型')
+    expect(wrapper.text()).not.toContain('昨日模型')
   })
 
   it('shows the model ranking and reorders expanded users with the selected column', async () => {

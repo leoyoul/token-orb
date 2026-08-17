@@ -826,7 +826,9 @@ async function refreshAdmin() {
     apiKey: settings.value.adminApiKey,
     poolGroupNames: settings.value.poolGroupNames
   })
-  // 刷新指标时保留已展开的明细，避免手动或定时刷新打断当前查看。
+  // 人员榜刷新后在后台更新已展开的模型明细，避免跨天或持续运行时展示旧快照。
+  const expandedUsers = adminMetrics.value.userRanking.filter((item) => isRankingUserExpanded(item))
+  void Promise.allSettled(expandedUsers.map((item) => loadRankingUserModels(item, true)))
   if (rankingView.value === 'models') void loadModelRanking()
 }
 
@@ -927,12 +929,19 @@ async function toggleRankingUser(item: UserTodayUsageRankItem) {
   }
 
   expandedRankingUserKeys.value = [...expandedRankingUserKeys.value, key]
-  if (item.userId === null || rankingModelUsageState.value[key]) {
-    void resizePlatformWindowToContent()
-    return
-  }
+  await loadRankingUserModels(item)
+  void resizePlatformWindowToContent()
+}
 
-  rankingModelUsageState.value = { ...rankingModelUsageState.value, [key]: 'loading' }
+async function loadRankingUserModels(item: UserTodayUsageRankItem, force = false) {
+  const key = rankingUserKey(item)
+  const state = rankingModelUsageState.value[key]
+  if (item.userId === null || (!force && (state === 'loading' || state === 'ready'))) return
+
+  const preserveExisting = force && rankingModelUsage.value[key] !== undefined
+  if (!preserveExisting) {
+    rankingModelUsageState.value = { ...rankingModelUsageState.value, [key]: 'loading' }
+  }
   const requestEpoch = (rankingModelUsageRequestEpochs.get(key) ?? 0) + 1
   rankingModelUsageRequestEpochs.set(key, requestEpoch)
   void resizePlatformWindowToContent()
@@ -947,7 +956,10 @@ async function toggleRankingUser(item: UserTodayUsageRankItem) {
     }
   } catch {
     if (rankingModelUsageRequestEpochs.get(key) === requestEpoch) {
-      rankingModelUsageState.value = { ...rankingModelUsageState.value, [key]: 'error' }
+      rankingModelUsageState.value = {
+        ...rankingModelUsageState.value,
+        [key]: preserveExisting ? 'ready' : 'error'
+      }
     }
   } finally {
     void resizePlatformWindowToContent()
