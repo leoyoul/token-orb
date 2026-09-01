@@ -461,6 +461,44 @@ describe('App settings sync', () => {
     expect(version.find('.platform-version__update-dot').exists()).toBe(false)
   })
 
+  it('retries the platform update check every five minutes after a transient failure', async () => {
+    checkForAvailableUpdate
+      .mockRejectedValueOnce(new Error('网络暂时不可用'))
+      .mockResolvedValueOnce({ body: '修复状态栏更新提示', version: '0.4.15' })
+    vi.clearAllTimers()
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: {} })
+    localStorage.setItem(settingsStorageKey, JSON.stringify({ ...baseSettings, refreshSeconds: 600 }))
+    const wrapper = mount(App)
+    await flushPromises()
+
+    expect(wrapper.find('.platform-version--available').exists()).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000)
+    await flushPromises()
+
+    expect(checkForAvailableUpdate).toHaveBeenCalledTimes(2)
+    expect(wrapper.find('.platform-version--available').exists()).toBe(true)
+  })
+
+  it('keeps the platform update prompt when a periodic recheck temporarily fails', async () => {
+    checkForAvailableUpdate
+      .mockResolvedValueOnce({ body: '修复状态栏更新提示', version: '0.4.15' })
+      .mockRejectedValueOnce(new Error('网络暂时不可用'))
+    vi.clearAllTimers()
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: {} })
+    localStorage.setItem(settingsStorageKey, JSON.stringify({ ...baseSettings, refreshSeconds: 600 }))
+    const wrapper = mount(App)
+    await flushPromises()
+
+    expect(wrapper.find('.platform-version--available').exists()).toBe(true)
+
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000)
+    await flushPromises()
+
+    expect(checkForAvailableUpdate).toHaveBeenCalledTimes(2)
+    expect(wrapper.find('.platform-version--available').exists()).toBe(true)
+  })
+
   it('rechecks the platform version when the existing window is shown again', async () => {
     checkForAvailableUpdate
       .mockResolvedValueOnce(null)

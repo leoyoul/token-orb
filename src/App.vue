@@ -737,6 +737,7 @@ const updateMessage = ref('点击重新检查获取最新版本。')
 const downloadPercent = ref<number | null>(null)
 let availableUpdate: import('@tauri-apps/plugin-updater').Update | null = null
 let timer: number | null = null
+let platformUpdateTimer: number | null = null
 let saveMessageTimer: number | null = null
 const rankingModelUsageRequestEpochs = new Map<string, number>()
 let modelRankingRefreshEpoch = 0
@@ -749,6 +750,8 @@ let checkingPlatformUpdate = false
 let adminRefreshEpoch = 0
 let collapsedDragStarted = false
 let collapsedDragStartAt = 0
+
+const platformUpdateCheckIntervalMs = 5 * 60 * 1000
 
 const hasAdmin = computed(() => hasAdminSettings(settings.value))
 const hasPersonal = computed(() => hasPersonalSettings(settings.value))
@@ -1275,10 +1278,18 @@ async function checkPlatformUpdate() {
     const { check } = await import('@tauri-apps/plugin-updater')
     platformUpdateAvailable.value = (await check()) !== null
   } catch {
-    platformUpdateAvailable.value = false
+    // 网络短暂失败时保留已发现的更新，下一轮定时检查会再次确认。
   } finally {
     checkingPlatformUpdate = false
   }
+}
+
+function schedulePlatformUpdateChecks() {
+  if (!isPlatformView || !('__TAURI_INTERNALS__' in window)) return
+  if (platformUpdateTimer !== null) window.clearInterval(platformUpdateTimer)
+  platformUpdateTimer = window.setInterval(() => {
+    void checkPlatformUpdate()
+  }, platformUpdateCheckIntervalMs)
 }
 
 async function listenForPlatformUpdateChecks() {
@@ -1296,6 +1307,7 @@ async function listenForPlatformUpdateChecks() {
 async function initRuntimeListenersAndUpdateStatus() {
   await listenForSettingsChanges()
   await listenForPlatformUpdateChecks()
+  schedulePlatformUpdateChecks()
   await checkPlatformUpdate()
 }
 
@@ -1830,6 +1842,7 @@ watch([updateState, updateBody, downloadPercent], () => {
 onBeforeUnmount(() => {
   window.removeEventListener('storage', syncExternalSettingsChange)
   if (timer !== null) window.clearInterval(timer)
+  if (platformUpdateTimer !== null) window.clearInterval(platformUpdateTimer)
   if (saveMessageTimer !== null) window.clearTimeout(saveMessageTimer)
   if (unlistenMoved) unlistenMoved()
   if (unlistenSettingsChanged) unlistenSettingsChanged()
