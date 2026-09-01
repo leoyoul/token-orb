@@ -1,3 +1,13 @@
+export const statusBarMetricKeys = [
+  'todayUsage',
+  'totalUsage',
+  'capacity',
+  'poolSevenDayRemaining',
+  'selectedUserUsage'
+] as const
+
+export type StatusBarMetricKey = typeof statusBarMetricKeys[number]
+
 export interface AppSettings {
   sub2apiBaseUrl: string
   adminApiKey: string
@@ -5,6 +15,8 @@ export interface AppSettings {
   personalToken: string
   poolGroupName: string
   poolGroupNames: string[]
+  statusBarMetrics: StatusBarMetricKey[]
+  statusBarUserId: number | null
   refreshSeconds: number
 }
 
@@ -15,6 +27,8 @@ export const defaultSettings: AppSettings = {
   personalToken: '',
   poolGroupName: '',
   poolGroupNames: [],
+  statusBarMetrics: [],
+  statusBarUserId: null,
   refreshSeconds: 30
 }
 
@@ -55,6 +69,8 @@ function sanitizeSettings(settings: Partial<AppSettings>): AppSettings {
   const poolGroupNames = normalizePoolGroupNames(
     Array.isArray(legacySettings.poolGroupNames) ? legacySettings.poolGroupNames : settings.poolGroupName ?? legacySettings.poolGroupId
   )
+  const statusBarMetrics = normalizeStatusBarMetrics(settings.statusBarMetrics)
+  const statusBarUserId = normalizeStatusBarUserId(settings.statusBarUserId)
   return {
     sub2apiBaseUrl: String(settings.sub2apiBaseUrl ?? defaultSettings.sub2apiBaseUrl),
     adminApiKey: String(settings.adminApiKey ?? defaultSettings.adminApiKey),
@@ -62,8 +78,21 @@ function sanitizeSettings(settings: Partial<AppSettings>): AppSettings {
     personalToken: String(settings.personalToken ?? defaultSettings.personalToken),
     poolGroupName: poolGroupNames[0] ?? defaultSettings.poolGroupName,
     poolGroupNames,
+    statusBarMetrics,
+    statusBarUserId,
     refreshSeconds: Number.isFinite(refreshSeconds) ? clamp(Math.round(refreshSeconds), 10, 300) : 30
   }
+}
+
+function normalizeStatusBarMetrics(value: unknown): StatusBarMetricKey[] {
+  if (!Array.isArray(value)) return []
+  const allowed = new Set<string>(statusBarMetricKeys)
+  return Array.from(new Set(value.filter((item): item is StatusBarMetricKey => typeof item === 'string' && allowed.has(item))))
+}
+
+function normalizeStatusBarUserId(value: unknown): number | null {
+  const userId = typeof value === 'number' ? value : Number(value)
+  return Number.isSafeInteger(userId) && userId > 0 ? userId : null
 }
 
 function normalizePoolGroupNames(value: unknown): string[] {

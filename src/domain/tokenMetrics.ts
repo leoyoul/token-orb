@@ -352,7 +352,7 @@ export function calculatePoolRemainingPercent(
   const wantedGroupIds = normalizeGroupIds(groupId)
   const percents = accounts
     .filter((item) => accountMatchesGroupId(item, wantedGroupIds))
-    .filter((item) => accountCountsInPool(item))
+    .filter((item) => accountCountsInPool(item, now))
     .map((item) => {
       if (!isRecord(item)) return null
       const extra = isRecord(item.extra) ? item.extra : item
@@ -413,7 +413,7 @@ export function listPoolResetItems(
   const wantedGroupIds = normalizeGroupIds(groupId)
   return accounts
     .filter((item) => accountMatchesGroupId(item, wantedGroupIds))
-    .filter((item) => accountCountsInPool(item))
+    .filter((item) => accountCountsInPool(item, now))
     .map((item) => {
       if (!isRecord(item)) return null
       const extra = isRecord(item.extra) ? item.extra : item
@@ -612,13 +612,8 @@ function groupIsActive(item: unknown): boolean {
   return status === '' || status === 'active'
 }
 
-function accountCountsInPool(item: unknown): boolean {
-  if (!isRecord(item)) return false
-  const status = String(item.status ?? '').trim().toLowerCase()
-  if (status && !['active', 'ratelimit', 'rate_limited', 'rate-limited', 'limited', 'overload', 'overloaded'].includes(status)) {
-    return false
-  }
-  return true
+function accountCountsInPool(item: unknown, now: Date): boolean {
+  return !accountIsErrored(item) && (accountIsActive(item, now) || accountIsLimited(item, now))
 }
 
 function accountIsActive(item: unknown, now = new Date()): boolean {

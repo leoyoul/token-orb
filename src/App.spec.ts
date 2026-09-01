@@ -139,6 +139,8 @@ const baseSettings: AppSettings = {
   personalToken: '',
   poolGroupName: '旧分组',
   poolGroupNames: ['旧分组'],
+  statusBarMetrics: [],
+  statusBarUserId: null,
   refreshSeconds: 10
 }
 
@@ -280,6 +282,114 @@ describe('App settings sync', () => {
     await flushPromises()
 
     expect(emitTauriEvent).toHaveBeenCalledWith('token-orb-settings-updated')
+  })
+
+  it('configures five status bar metrics and persists a selected user id', async () => {
+    window.history.replaceState({}, '', '/?view=settings')
+    localStorage.setItem(settingsStorageKey, JSON.stringify(baseSettings))
+    vi.mocked(fetchAdminMonitorMetrics).mockResolvedValueOnce({
+      todayTotalTokens: 2_240_000,
+      todayTotalCost: 2.66,
+      totalTokens: 25_990_000_000,
+      totalActualCost: 17_730,
+      poolRemainingPercent: 92,
+      poolLatestResetAt: null,
+      poolResetItems: [],
+      poolSevenDayRemainingPercent: 89,
+      poolAccounts: null,
+      poolCapacity: { groupId: 1, concurrencyUsed: 2, concurrencyMax: 100 },
+      poolAccountDetails: [],
+      userRanking: [],
+      userIdentities: [{ id: 2048, username: '唐家乐', email: 'tang@example.com' }],
+      updatedAt: new Date().toISOString()
+    })
+    const wrapper = mount(App)
+    await flushPromises()
+
+    const metricInputs = wrapper.findAll('.status-bar-option input[type="checkbox"]')
+    expect(metricInputs).toHaveLength(5)
+    expect(wrapper.find('select[name="status-bar-user-id"]').exists()).toBe(false)
+
+    await wrapper.get('input[name="status-bar-todayUsage"]').setValue(true)
+    await wrapper.get('input[name="status-bar-selectedUserUsage"]').setValue(true)
+    await wrapper.get('select[name="status-bar-user-id"]').setValue('2048')
+    expect(wrapper.get('.status-bar-preview').text()).toContain('今日 2.24M')
+    await wrapper.get('button.primary-button').trigger('click')
+    await flushPromises()
+
+    expect(JSON.parse(localStorage.getItem(settingsStorageKey) ?? '{}')).toEqual(expect.objectContaining({
+      statusBarMetrics: ['todayUsage', 'selectedUserUsage'],
+      statusBarUserId: 2048
+    }))
+  })
+
+  it('publishes valid platform metrics and falls back to the matching user ranking', async () => {
+    window.history.replaceState({}, '', '/?view=platform')
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: {} })
+    localStorage.setItem(settingsStorageKey, JSON.stringify({
+      ...baseSettings,
+      personalFloatingEnabled: false,
+      statusBarMetrics: ['todayUsage', 'selectedUserUsage'],
+      statusBarUserId: 2048
+    }))
+    vi.mocked(fetchAdminMonitorMetrics).mockResolvedValueOnce({
+      todayTotalTokens: 2_240_000,
+      todayTotalCost: 2.66,
+      poolRemainingPercent: null,
+      poolLatestResetAt: null,
+      poolResetItems: [],
+      poolAccounts: null,
+      poolCapacity: null,
+      poolAccountDetails: [],
+      userRanking: [{
+        rank: 1,
+        userId: 2048,
+        name: '唐家乐',
+        email: 'tang@example.com',
+        displayName: '唐家乐（tang@example.com）',
+        tokens: 3_000,
+        actualCost: 1
+      }],
+      userIdentities: [{ id: 2048, username: '唐家乐', email: 'tang@example.com' }],
+      updatedAt: new Date().toISOString()
+    })
+    vi.mocked(fetchAdminUserModelUsage).mockRejectedValueOnce(new Error('用户模型统计暂时不可用'))
+    const context = {
+      font: '',
+      fillStyle: '',
+      strokeStyle: '',
+      lineWidth: 1,
+      textAlign: 'start',
+      textBaseline: 'alphabetic',
+      beginPath: vi.fn(),
+      arc: vi.fn(),
+      stroke: vi.fn(),
+      fill: vi.fn(),
+      clearRect: vi.fn(),
+      fillText: vi.fn(),
+      measureText: vi.fn((text: string) => ({ width: text.length * 7 })),
+      getImageData: vi.fn((_x: number, _y: number, width: number, height: number) => ({
+        data: new Uint8ClampedArray(width * height * 4)
+      }))
+    }
+    const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(context as unknown as CanvasRenderingContext2D)
+
+    mount(App)
+    await flushPromises()
+
+    expect(invokeTauriCommand).toHaveBeenCalledWith('set_tray_status_image', {
+      image: expect.objectContaining({
+        rgba: expect.any(Array),
+        width: expect.any(Number),
+        height: 36
+      }),
+      tooltip: '今日 2.24M $2.66 | 用户 3.00K $1.00'
+    })
+    expect(fetchAdminUserModelUsage).toHaveBeenCalledWith({
+      baseUrl: baseSettings.sub2apiBaseUrl,
+      apiKey: baseSettings.adminApiKey
+    }, 2048)
+    getContext.mockRestore()
   })
 
   it('shows the personal floating window after receiving updated settings from Tauri', async () => {

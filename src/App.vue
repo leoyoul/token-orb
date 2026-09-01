@@ -83,6 +83,46 @@
         </div>
       </label>
 
+      <section class="status-bar-settings" aria-labelledby="status-bar-settings-title">
+        <div class="section-title status-bar-settings__title">
+          <MonitorDot :size="18" />
+          <span id="status-bar-settings-title">状态栏显示</span>
+        </div>
+
+        <div class="status-bar-preview" :class="{ empty: draftStatusBarItems.length === 0 }">
+          <span v-if="draftStatusBarItems.length === 0">Token Orb</span>
+          <div v-for="item in draftStatusBarItems" v-else :key="item.key" class="status-bar-preview__item">
+            <small>{{ item.topText }}</small>
+            <strong>{{ item.bottomText }}</strong>
+          </div>
+        </div>
+
+        <div class="status-bar-options">
+          <label v-for="option in statusBarMetricOptions" :key="option.key" class="status-bar-option">
+            <input
+              v-model="draft.statusBarMetrics"
+              :name="`status-bar-${option.key}`"
+              :value="option.key"
+              type="checkbox"
+            />
+            <span>{{ option.label }}</span>
+          </label>
+        </div>
+
+        <label v-if="draft.statusBarMetrics.includes('selectedUserUsage')" class="field status-bar-user-field">
+          <span>指定用户</span>
+          <select v-model="draft.statusBarUserId" name="status-bar-user-id">
+            <option :value="null">请选择用户</option>
+            <option v-if="draft.statusBarUserId && !draftStatusBarUserExists" :value="draft.statusBarUserId">
+              用户 #{{ draft.statusBarUserId }}（当前不可用）
+            </option>
+            <option v-for="user in statusBarUserOptions" :key="user.id" :value="user.id">
+              {{ user.label }}
+            </option>
+          </select>
+        </label>
+      </section>
+
       <label class="field compact-field">
         <span>刷新间隔</span>
         <input v-model.number="draft.refreshSeconds" min="10" max="300" step="5" type="number" />
@@ -586,16 +626,24 @@ import {
   type PoolAccountUsageWindowType,
   type PoolResetItem,
   type TokenOrbMetrics,
+  type UserIdentityItem,
   type UserModelUsageItem,
   type UserTodayUsageRankItem
 } from '@/domain/tokenMetrics'
+import {
+  aggregateUserModelUsage,
+  buildStatusBarDisplayItems,
+  type SelectedUserUsage,
+  type StatusBarDisplayItem
+} from '@/domain/statusBar'
 import {
   hasAdminSettings,
   hasPersonalSettings,
   loadSettings,
   saveSettings,
   settingsStorageKey,
-  type AppSettings
+  type AppSettings,
+  type StatusBarMetricKey
 } from '@/domain/settings'
 
 type TauriWindowApi = typeof import('@tauri-apps/api/window')
@@ -611,6 +659,14 @@ interface FloatingState {
 type AccountStatusFilter = 'normal' | 'limited' | 'error' | 'all'
 type RankingView = 'users' | 'models'
 type ModelRankingSort = 'requests' | 'tokens' | 'cost'
+
+const statusBarMetricOptions: Array<{ key: StatusBarMetricKey; label: string }> = [
+  { key: 'todayUsage', label: '今日总消耗' },
+  { key: 'totalUsage', label: '总消耗' },
+  { key: 'capacity', label: '容量' },
+  { key: 'poolSevenDayRemaining', label: '7 日号池剩余量' },
+  { key: 'selectedUserUsage', label: '用户' }
+]
 
 const floatingStorageKey = 'token-orb-floating-v1'
 const accountFilterStorageKey = 'token-orb-account-filter-v1'
@@ -639,11 +695,14 @@ const adminMetrics = ref<AdminMonitorMetrics>({
   userRanking: [],
   updatedAt: null
 })
+const selectedUserUsage = ref<SelectedUserUsage | null>(null)
 const view = new URLSearchParams(window.location.search).get('view') ?? 'personal'
 const isSettingsView = view === 'settings'
 const isPlatformView = view === 'platform'
 const isUpdaterView = view === 'updater'
 const isTrayMenuView = view === 'tray-menu'
+const isMainView = !isSettingsView && !isPlatformView && !isUpdaterView && !isTrayMenuView
+const isStatusBarPublisher = isMainView || isPlatformView
 const loading = ref(false)
 const errorMessage = ref('')
 const saveMessage = ref('')
@@ -687,6 +746,7 @@ let unlistenPlatformUpdateCheck: (() => void) | null = null
 let tauriWindowApi: TauriWindowApi | null = null
 let floatingWindowInitialized = false
 let checkingPlatformUpdate = false
+let adminRefreshEpoch = 0
 let collapsedDragStarted = false
 let collapsedDragStartAt = 0
 
@@ -724,6 +784,18 @@ const formattedSelectedPoolResetItems = computed(() => (poolWindowType.value ===
   : adminMetrics.value.poolResetItems).map(formatPoolResetItem))
 const displayedUserRanking = computed(() => sortUserRanking(adminMetrics.value.userRanking, rankingMode.value))
 const sortedModelRanking = computed(() => sortModelRanking(modelRanking.value, modelRankingSort.value))
+const statusBarUserOptions = computed(() => (adminMetrics.value.userIdentities ?? []).map((user) => ({
+  id: user.id,
+  label: formatUserIdentityLabel(user)
+})))
+const draftStatusBarUserExists = computed(() => draft.statusBarUserId === null
+  || statusBarUserOptions.value.some((user) => user.id === draft.statusBarUserId))
+const draftStatusBarItems = computed(() => buildStatusBarDisplayItems(
+  draft,
+  adminMetrics.value,
+  draft.statusBarUserId === settings.value.statusBarUserId ? selectedUserUsage.value : null
+))
+const statusBarItems = computed(() => buildStatusBarDisplayItems(settings.value, adminMetrics.value, selectedUserUsage.value))
 const filteredPoolAccountDetails = computed(() => {
   if (selectedAccountStatus.value === 'all') return adminMetrics.value.poolAccountDetails
   return adminMetrics.value.poolAccountDetails.filter((item) => item.status === selectedAccountStatus.value)
@@ -783,7 +855,11 @@ const platformUpdatedText = computed(() => {
 const updateBusy = computed(() => updateState.value === 'checking' || updateState.value === 'downloading')
 
 async function refreshAll() {
-  if (!hasAdmin.value && !hasPersonal.value) return
+  if (!hasAdmin.value && !hasPersonal.value) {
+    selectedUserUsage.value = null
+    await updateTrayStatus()
+    return
+  }
   loading.value = true
   errorMessage.value = ''
   const errors: string[] = []
@@ -810,6 +886,7 @@ async function refreshAll() {
     }
   } finally {
     loading.value = false
+    await updateTrayStatus()
   }
 }
 
@@ -823,11 +900,37 @@ async function refreshPersonal() {
 
 async function refreshAdmin() {
   if (!hasAdmin.value) return
-  adminMetrics.value = await fetchAdminMonitorMetrics({
+  const refreshEpoch = ++adminRefreshEpoch
+  const adminRequest = fetchAdminMonitorMetrics({
     baseUrl: settings.value.sub2apiBaseUrl,
     apiKey: settings.value.adminApiKey,
     poolGroupNames: settings.value.poolGroupNames
   })
+  const selectedUserId = settings.value.statusBarMetrics.includes('selectedUserUsage')
+    ? settings.value.statusBarUserId
+    : null
+  const selectedUserRequest = selectedUserId === null
+    ? Promise.resolve(null)
+    : fetchAdminUserModelUsage({
+        baseUrl: settings.value.sub2apiBaseUrl,
+        apiKey: settings.value.adminApiKey
+      }, selectedUserId).catch(() => null)
+
+  const [nextAdminMetrics, selectedUserModels] = await Promise.all([adminRequest, selectedUserRequest])
+  if (refreshEpoch !== adminRefreshEpoch) return
+  adminMetrics.value = nextAdminMetrics
+  if (selectedUserId !== null && selectedUserModels !== null) {
+    selectedUserUsage.value = {
+      ...aggregateUserModelUsage(selectedUserModels)
+    }
+  } else if (selectedUserId !== null) {
+    const rankingUsage = nextAdminMetrics.userRanking.find((item) => item.userId === selectedUserId)
+    selectedUserUsage.value = rankingUsage
+      ? { tokens: rankingUsage.tokens, actualCost: rankingUsage.actualCost }
+      : null
+  } else {
+    selectedUserUsage.value = null
+  }
   // 人员榜刷新后在后台更新已展开的模型明细，避免跨天或持续运行时展示旧快照。
   const expandedUsers = adminMetrics.value.userRanking.filter((item) => isRankingUserExpanded(item))
   void Promise.allSettled(expandedUsers.map((item) => loadRankingUserModels(item, true)))
@@ -1303,6 +1406,14 @@ function saveDraft() {
   void notifySettingsChanged()
 }
 
+function formatUserIdentityLabel(user: UserIdentityItem, includeEmail = true): string {
+  const username = user.username.trim()
+  const email = user.email.trim()
+  if (!includeEmail) return username || `用户 #${user.id}`
+  if (includeEmail && username && email) return `${username}（${email}）`
+  return username || email || `用户 #${user.id}`
+}
+
 async function testPersonalToken() {
   const baseUrl = draft.sub2apiBaseUrl.trim()
   const token = draft.personalToken.trim()
@@ -1358,6 +1469,7 @@ function applyLatestSettings() {
   syncSettingsDraft(settings.value)
   scheduleRefresh()
   void refreshAll()
+  void updateTrayStatus()
   void initFloatingWindow()
 }
 
@@ -1384,8 +1496,88 @@ async function listenForSettingsChanges() {
 function createSettingsDraft(source: AppSettings): AppSettings {
   return {
     ...source,
-    poolGroupNames: [...source.poolGroupNames]
+    poolGroupNames: [...source.poolGroupNames],
+    statusBarMetrics: [...source.statusBarMetrics]
   }
+}
+
+async function updateTrayStatus() {
+  if (!isStatusBarPublisher || !('__TAURI_INTERNALS__' in window)) return
+  const items = statusBarItems.value
+  const shouldReset = items.length === 0 || !hasAdmin.value
+  if (!shouldReset && adminMetrics.value.updatedAt === null) return
+  const tooltip = items.length === 0
+    ? 'Token Orb'
+    : items.map((item) => `${item.topText} ${item.bottomText}`).join(' | ')
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('set_tray_status_image', {
+      image: shouldReset ? null : renderStatusBarImage(items),
+      tooltip: shouldReset ? 'Token Orb' : tooltip
+    })
+  } catch {
+    // 状态栏更新失败不应影响监控数据刷新。
+  }
+}
+
+function renderStatusBarImage(items: StatusBarDisplayItem[]): { rgba: number[]; width: number; height: number } | null {
+  const canvas = document.createElement('canvas')
+  const context = canvas.getContext('2d')
+  if (!context) return null
+
+  const height = 36
+  const horizontalPadding = 8
+  const orbWidth = 24
+  const columnGap = 14
+  const statusBarFont = '700 15px -apple-system, BlinkMacSystemFont, sans-serif'
+  context.font = statusBarFont
+  const itemWidths = items.map((item) => Math.max(
+    context.measureText(item.topText).width,
+    measureStatusBarText(context, item.bottomText, statusBarFont)
+  ) + 8)
+  const width = Math.min(1024, Math.ceil(horizontalPadding * 2 + orbWidth + itemWidths.reduce((sum, value) => sum + value, 0) + columnGap * Math.max(0, items.length - 1)))
+  canvas.width = width
+  canvas.height = height
+  context.clearRect(0, 0, width, height)
+  const prefersDark = typeof window.matchMedia !== 'function'
+    || window.matchMedia('(prefers-color-scheme: dark)').matches
+  const foreground = prefersDark ? '#ffffff' : '#111827'
+  context.fillStyle = foreground
+
+  context.beginPath()
+  context.arc(12, 18, 7, 0, Math.PI * 2)
+  context.lineWidth = 3
+  context.strokeStyle = foreground
+  context.stroke()
+  context.beginPath()
+  context.arc(12, 18, 2.2, 0, Math.PI * 2)
+  context.fill()
+
+  let x = horizontalPadding + orbWidth
+  for (const [index, item] of items.entries()) {
+    if (x >= width - horizontalPadding) break
+    const availableWidth = Math.max(0, Math.min(itemWidths[index], width - horizontalPadding - x))
+    context.textAlign = 'center'
+    context.textBaseline = 'alphabetic'
+    context.font = statusBarFont
+    context.fillText(item.topText, x + availableWidth / 2, 14, availableWidth)
+    context.fillText(item.bottomText, x + availableWidth / 2, 31, availableWidth)
+    x += availableWidth + columnGap
+  }
+
+  return {
+    rgba: Array.from(context.getImageData(0, 0, width, height).data),
+    width,
+    height
+  }
+}
+
+function measureStatusBarText(context: CanvasRenderingContext2D, text: string, font: string): number {
+  const previousFont = context.font
+  context.font = font
+  const width = context.measureText(text).width
+  context.font = previousFont
+  return width
 }
 
 function syncSettingsDraft(source: AppSettings) {

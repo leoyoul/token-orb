@@ -567,6 +567,32 @@ describe('tokenMetrics', () => {
     expect(calculatePoolRemainingPercent(accounts, 1, new Date('2026-03-16T09:00:00Z'), '7d')).toBe(60)
   })
 
+  it('excludes disabled and errored accounts from the 7d pool average', () => {
+    const accounts = [
+      {
+        group_id: 1,
+        status: 'active',
+        schedulable: true,
+        extra: { codex_7d_used_percent: 11, codex_7d_reset_at: '2026-03-23T09:00:00Z' }
+      },
+      ...Array.from({ length: 9 }, (_, index) => ({
+        id: index + 2,
+        group_id: 1,
+        status: 'active',
+        schedulable: false,
+        extra: { codex_7d_used_percent: 0, codex_7d_reset_at: '2026-03-23T09:00:00Z' }
+      })),
+      ...Array.from({ length: 5 }, (_, index) => ({
+        id: index + 20,
+        group_id: 1,
+        status: 'error',
+        extra: { codex_7d_used_percent: 0, codex_7d_reset_at: '2026-03-23T09:00:00Z' }
+      }))
+    ]
+
+    expect(calculatePoolRemainingPercent(accounts, 1, new Date('2026-03-16T09:00:00Z'), '7d')).toBe(89)
+  })
+
   it('treats expired 5h usage windows as fully remaining', () => {
     const accounts = [
       {

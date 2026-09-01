@@ -31,7 +31,8 @@ body:has(.tray-menu-shell) {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -1451,6 +1452,114 @@ button.ranking-row {
 }
 
 .field input:focus {
+  border-color: #20e3b2;
+  box-shadow: 0 0 0 3px rgba(32, 227, 178, 0.12);
+}
+
+.status-bar-settings {
+  margin: 4px 0 14px;
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
+  padding-top: 13px;
+}
+
+.status-bar-settings__title {
+  margin-bottom: 9px;
+}
+
+.status-bar-preview {
+  display: flex;
+  min-height: 50px;
+  align-items: stretch;
+  gap: 12px;
+  overflow-x: auto;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 8px;
+  color: #f8fafc;
+  background: #252a31;
+  padding: 7px 10px;
+  scrollbar-width: thin;
+}
+
+.status-bar-preview.empty {
+  align-items: center;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.status-bar-preview__item {
+  display: grid;
+  min-width: max-content;
+  align-content: center;
+  justify-items: center;
+  line-height: 1;
+}
+
+.status-bar-preview__item small {
+  color: #cbd5e1;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.status-bar-preview__item strong {
+  margin-top: 4px;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.status-bar-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 12px;
+  margin-top: 10px;
+}
+
+.status-bar-option {
+  display: flex;
+  min-width: 0;
+  min-height: 28px;
+  align-items: center;
+  gap: 7px;
+  color: #cbd5e1;
+  cursor: pointer;
+}
+
+.status-bar-option input {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  accent-color: #14b8a6;
+}
+
+.status-bar-option span {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-bar-user-field {
+  margin: 8px 0 0;
+}
+
+.status-bar-user-field select {
+  width: 100%;
+  height: 38px;
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  border-radius: 8px;
+  color: #f8fafc;
+  background: #111827;
+  outline: none;
+  padding: 0 10px;
+}
+
+.status-bar-user-field select:focus {
   border-color: #20e3b2;
   box-shadow: 0 0 0 3px rgba(32, 227, 178, 0.12);
 }

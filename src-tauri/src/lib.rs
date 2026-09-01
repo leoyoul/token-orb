@@ -15,13 +15,23 @@ struct Sub2apiRequest {
     body: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TrayStatusImage {
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+const MAX_TRAY_STATUS_WIDTH: u32 = 1024;
+const MAX_TRAY_STATUS_HEIGHT: u32 = 128;
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![sub2api_request, tray_command])
+        .invoke_handler(tauri::generate_handler![sub2api_request, tray_command, set_tray_status_image])
         .setup(|app| {
             let handle = app.handle().clone();
             if let Some(window) = app.get_webview_window("main") {
@@ -67,6 +77,66 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running token orb");
+}
+
+#[tauri::command]
+fn set_tray_status_image(
+    app: AppHandle,
+    image: Option<TrayStatusImage>,
+    tooltip: String,
+) -> Result<(), String> {
+    let tray = app
+        .tray_by_id("main")
+        .ok_or_else(|| "Token Orb 状态栏图标尚未初始化".to_string())?;
+    let tooltip = tooltip.trim();
+    tray.set_tooltip(Some(if tooltip.is_empty() { "Token Orb" } else { tooltip }))
+        .map_err(|error| format!("更新状态栏提示失败: {error}"))?;
+
+    if let Some(image) = image {
+        validate_tray_status_image(image.width, image.height, &image.rgba)?;
+        #[cfg(target_os = "macos")]
+        {
+            tray.set_icon(Some(Image::new_owned(image.rgba, image.width, image.height)))
+                .map_err(|error| format!("更新状态栏图像失败: {error}"))?;
+        }
+    } else {
+        #[cfg(target_os = "macos")]
+        {
+            tray.set_icon(Some(Image::new(
+                tray_icon_rgba::TRAY_ICON_RGBA,
+                tray_icon_rgba::TRAY_ICON_WIDTH,
+                tray_icon_rgba::TRAY_ICON_HEIGHT,
+            )))
+            .map_err(|error| format!("恢复默认状态栏图标失败: {error}"))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_tray_status_image(width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err("状态栏图像尺寸必须大于 0".to_string());
+    }
+    if width > MAX_TRAY_STATUS_WIDTH || height > MAX_TRAY_STATUS_HEIGHT {
+        return Err(format!(
+            "状态栏图像尺寸超过限制: {width}x{height}"
+        ));
+    }
+    let expected_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|value| value.checked_mul(4))
+        .ok_or_else(|| "状态栏图像尺寸溢出".to_string())?;
+    if rgba.len() != expected_len {
+        return Err(format!(
+            "状态栏 RGBA 长度不匹配: 期望 {expected_len}，实际 {}",
+            rgba.len()
+        ));
+    }
+    if !rgba.chunks_exact(4).any(|pixel| pixel[3] > 0) {
+        return Err("状态栏图像不能完全透明".to_string());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -360,5 +430,16 @@ mod tests {
         );
 
         assert_eq!(position, PhysicalPosition::new(1022, 592));
+    }
+
+    #[test]
+    fn tray_status_image_requires_matching_bounded_rgba_data() {
+        let mut visible_image = vec![0; 200 * 36 * 4];
+        visible_image[3] = 255;
+        assert!(validate_tray_status_image(200, 36, &visible_image).is_ok());
+        assert!(validate_tray_status_image(0, 36, &[]).is_err());
+        assert!(validate_tray_status_image(1025, 36, &visible_image).is_err());
+        assert!(validate_tray_status_image(200, 36, &[0]).is_err());
+        assert!(validate_tray_status_image(1, 1, &[0, 0, 0, 0]).is_err());
     }
 }
