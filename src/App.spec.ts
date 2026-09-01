@@ -2,7 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App.vue'
 import { settingsStorageKey, type AppSettings } from '@/domain/settings'
-import { fetchAdminModelUsageRanking, fetchAdminModelUserUsage, fetchAdminMonitorMetrics, fetchAdminUserModelUsage, fetchSub2apiMetrics } from '@/domain/sub2apiClient'
+import { fetchAdminModelUsageRanking, fetchAdminModelUserUsage, fetchAdminMonitorMetrics, fetchAdminUserModelUsage, fetchAdminUsers, fetchSub2apiMetrics } from '@/domain/sub2apiClient'
 
 const { checkForAvailableUpdate, emitTauriEvent, getPlatformUpdateCheckListener, getSettingsUpdatedListener, getAppVersion, hidePersonalFloatingOrb, invokeTauriCommand, listenTauriEvent, openReleaseNotes, resetTauriEventListeners, tauriWindow } = vi.hoisted(() => {
   let platformUpdateCheckListener: (() => void) | undefined
@@ -98,6 +98,7 @@ vi.mock('@/domain/sub2apiClient', () => ({
     updatedAt: new Date().toISOString()
   })),
   fetchAdminUserModelUsage: vi.fn(async () => []),
+  fetchAdminUsers: vi.fn(async () => []),
   fetchAdminModelUsageRanking: vi.fn(async () => []),
   fetchAdminModelUserUsage: vi.fn(async () => [])
 }))
@@ -152,6 +153,7 @@ describe('App settings sync', () => {
     vi.stubGlobal('localStorage', localStorageMock)
     Object.defineProperty(window, 'localStorage', { configurable: true, value: localStorageMock })
     localStorage.clear()
+    vi.mocked(fetchAdminUsers).mockResolvedValue([])
     delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
     window.history.replaceState({}, '', '/?view=platform')
   })
@@ -303,8 +305,15 @@ describe('App settings sync', () => {
       userIdentities: [{ id: 2048, username: '唐家乐', email: 'tang@example.com' }],
       updatedAt: new Date().toISOString()
     })
+    vi.mocked(fetchAdminUsers).mockResolvedValue([
+      { id: 2048, username: '唐家乐', email: 'tang@example.com' }
+    ])
     const wrapper = mount(App)
     await flushPromises()
+
+    expect(fetchAdminMonitorMetrics).toHaveBeenCalledWith(expect.objectContaining({
+      includeUserIdentities: false
+    }))
 
     const metricInputs = wrapper.findAll('.status-bar-option input[type="checkbox"]')
     expect(metricInputs).toHaveLength(5)
@@ -321,6 +330,47 @@ describe('App settings sync', () => {
       statusBarMetrics: ['todayUsage', 'selectedUserUsage'],
       statusBarUserId: 2048
     }))
+  })
+
+  it('loads selectable status bar users independently when monitor metrics fail', async () => {
+    window.history.replaceState({}, '', '/?view=settings')
+    localStorage.setItem(settingsStorageKey, JSON.stringify(baseSettings))
+    vi.mocked(fetchAdminMonitorMetrics).mockRejectedValueOnce(new Error('容量接口暂时不可用'))
+    vi.mocked(fetchAdminUsers).mockResolvedValueOnce([
+      { id: 2048, username: '唐家乐', email: 'tang@example.com' }
+    ])
+
+    const wrapper = mount(App)
+    await flushPromises()
+    await wrapper.get('input[name="status-bar-selectedUserUsage"]').setValue(true)
+
+    const select = wrapper.get('select[name="status-bar-user-id"]')
+    expect(select.attributes('disabled')).toBeUndefined()
+    expect(select.text()).toContain('唐家乐（tang@example.com）')
+    await select.setValue('2048')
+    expect((select.element as HTMLSelectElement).value).toBe('2048')
+  })
+
+  it('explains a status bar user request failure and recovers on the next refresh', async () => {
+    window.history.replaceState({}, '', '/?view=settings')
+    localStorage.setItem(settingsStorageKey, JSON.stringify(baseSettings))
+    vi.mocked(fetchAdminUsers)
+      .mockRejectedValueOnce(new Error('认证失败'))
+      .mockResolvedValueOnce([{ id: 2048, username: '唐家乐', email: 'tang@example.com' }])
+
+    const wrapper = mount(App)
+    await flushPromises()
+    await wrapper.get('input[name="status-bar-selectedUserUsage"]').setValue(true)
+
+    const select = wrapper.get('select[name="status-bar-user-id"]')
+    expect(select.attributes('disabled')).toBeDefined()
+    expect(select.text()).toContain('用户加载失败，请检查配置')
+
+    await vi.advanceTimersByTimeAsync(baseSettings.refreshSeconds * 1000)
+    await flushPromises()
+
+    expect(select.attributes('disabled')).toBeUndefined()
+    expect(select.text()).toContain('唐家乐（tang@example.com）')
   })
 
   it('publishes valid platform metrics and falls back to the matching user ranking', async () => {

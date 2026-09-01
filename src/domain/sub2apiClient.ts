@@ -47,6 +47,7 @@ export interface AdminMonitorConfig {
   apiKey: string
   poolGroupName?: string
   poolGroupNames?: string[]
+  includeUserIdentities?: boolean
 }
 
 export async function fetchSub2apiMetrics(config: Sub2apiConfig): Promise<TokenOrbMetrics> {
@@ -90,10 +91,13 @@ export async function fetchAdminMonitorMetrics(config: AdminMonitorConfig): Prom
         )
       : [requestJson(buildRealtimeUrl(`${baseUrl}/api/v1/admin/accounts?page=1&page_size=200`, refreshAt), realtimeHeaders)]
 
+  const usersRequest = config.includeUserIdentities === false
+    ? Promise.resolve(null)
+    : requestJson(`${baseUrl}/api/v1/admin/users?page=1&page_size=200`, headers)
   const [statsPayload, rankingPayload, usersPayload, accountsPayloads, capacityPayload] = await Promise.all([
     requestJson(buildRealtimeUrl(`${baseUrl}/api/v1/admin/dashboard/stats?timezone=${encodeURIComponent(timezone)}`, refreshAt), realtimeHeaders),
     requestJson(buildRealtimeUrl(`${baseUrl}/api/v1/admin/dashboard/users-ranking?${todayQuery}&limit=10`, refreshAt), realtimeHeaders),
-    requestJson(`${baseUrl}/api/v1/admin/users?page=1&page_size=200`, headers),
+    usersRequest,
     Promise.all(accountsRequests),
     requestJson(buildRealtimeUrl(`${baseUrl}/api/v1/admin/groups/capacity-summary?timezone=${encodeURIComponent(timezone)}`, refreshAt), realtimeHeaders)
   ])
@@ -107,7 +111,7 @@ export async function fetchAdminMonitorMetrics(config: AdminMonitorConfig): Prom
         fetchAccountSevenDayCosts(baseUrl, headers, accountItems, refreshAt)
       ])
     : [{}, {}]
-  const userIdentities = parseUsers(usersPayload)
+  const userIdentities = usersPayload === null ? [] : parseUsers(usersPayload)
 
   return {
     todayTotalTokens: parseTodayTokens(statsPayload),
@@ -133,6 +137,15 @@ export async function fetchAdminMonitorMetrics(config: AdminMonitorConfig): Prom
     userIdentities,
     updatedAt: new Date().toISOString()
   }
+}
+
+export async function fetchAdminUsers(
+  config: Pick<AdminMonitorConfig, 'baseUrl' | 'apiKey'>
+): Promise<UserIdentityItem[]> {
+  const baseUrl = normalizeBaseUrl(config.baseUrl)
+  const headers = buildAdminApiKeyHeaders(config.apiKey)
+  const payload = await requestJson(`${baseUrl}/api/v1/admin/users?page=1&page_size=200`, headers)
+  return parseUsers(payload)
 }
 
 export async function fetchAdminUserModelUsage(

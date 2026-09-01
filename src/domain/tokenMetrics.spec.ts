@@ -31,7 +31,7 @@ import {
   parseUserRanking,
   parseUsers
 } from './tokenMetrics'
-import { buildRealtimeUrl, fetchAdminMonitorMetrics, fetchAdminUserModelUsage, fetchSub2apiMetrics } from './sub2apiClient'
+import { buildRealtimeUrl, fetchAdminMonitorMetrics, fetchAdminUserModelUsage, fetchAdminUsers, fetchSub2apiMetrics } from './sub2apiClient'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -392,6 +392,55 @@ describe('tokenMetrics', () => {
     expect(accountUrl).toBeTruthy()
     expect(accountUrl).toContain('page_size=200')
     expect(accountUrl).not.toContain('lite=true')
+  })
+
+  it('loads admin users independently for settings controls', async () => {
+    const requestedUrls: string[] = []
+    Reflect.deleteProperty(window, '__TAURI_INTERNALS__')
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL) => {
+      requestedUrls.push(String(url))
+      return new Response(JSON.stringify({
+        data: {
+          items: [{ id: 2048, username: '唐家乐', email: 'tang@example.com' }],
+          total: 1,
+          page: 1,
+          page_size: 200,
+          pages: 1
+        }
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    }))
+
+    const users = await fetchAdminUsers({
+      baseUrl: 'http://127.0.0.1:8081',
+      apiKey: 'admin-key'
+    })
+
+    expect(requestedUrls).toEqual(['http://127.0.0.1:8081/api/v1/admin/users?page=1&page_size=200'])
+    expect(users).toEqual([{ id: 2048, username: '唐家乐', email: 'tang@example.com' }])
+  })
+
+  it('skips the bundled users request when settings loads users independently', async () => {
+    const requestedUrls: string[] = []
+    Reflect.deleteProperty(window, '__TAURI_INTERNALS__')
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL) => {
+      requestedUrls.push(String(url))
+      return new Response(JSON.stringify({ data: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    }))
+
+    const metrics = await fetchAdminMonitorMetrics({
+      baseUrl: 'http://127.0.0.1:8081',
+      apiKey: 'admin-key',
+      includeUserIdentities: false
+    })
+
+    expect(requestedUrls.some((url) => url.includes('/api/v1/admin/users?'))).toBe(false)
+    expect(metrics.userIdentities).toEqual([])
   })
 
   it('loads batch today stats and merges them into admin account details', async () => {

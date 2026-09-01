@@ -111,8 +111,12 @@
 
         <label v-if="draft.statusBarMetrics.includes('selectedUserUsage')" class="field status-bar-user-field">
           <span>指定用户</span>
-          <select v-model="draft.statusBarUserId" name="status-bar-user-id">
-            <option :value="null">请选择用户</option>
+          <select
+            v-model="draft.statusBarUserId"
+            name="status-bar-user-id"
+            :disabled="statusBarUserSelectDisabled"
+          >
+            <option :value="null">{{ statusBarUserPlaceholder }}</option>
             <option v-if="draft.statusBarUserId && !draftStatusBarUserExists" :value="draft.statusBarUserId">
               用户 #{{ draft.statusBarUserId }}（当前不可用）
             </option>
@@ -611,7 +615,7 @@ import {
   Users,
   X
 } from 'lucide-vue-next'
-import { fetchAdminModelUsageRanking, fetchAdminModelUserUsage, fetchAdminMonitorMetrics, fetchAdminUserModelUsage, fetchSub2apiMetrics } from '@/domain/sub2apiClient'
+import { fetchAdminModelUsageRanking, fetchAdminModelUserUsage, fetchAdminMonitorMetrics, fetchAdminUserModelUsage, fetchAdminUsers, fetchSub2apiMetrics } from '@/domain/sub2apiClient'
 import {
   formatCost,
   formatFixedCost,
@@ -696,6 +700,8 @@ const adminMetrics = ref<AdminMonitorMetrics>({
   updatedAt: null
 })
 const selectedUserUsage = ref<SelectedUserUsage | null>(null)
+const statusBarUsers = ref<UserIdentityItem[]>([])
+const statusBarUsersState = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
 const view = new URLSearchParams(window.location.search).get('view') ?? 'personal'
 const isSettingsView = view === 'settings'
 const isPlatformView = view === 'platform'
@@ -748,6 +754,7 @@ let tauriWindowApi: TauriWindowApi | null = null
 let floatingWindowInitialized = false
 let checkingPlatformUpdate = false
 let adminRefreshEpoch = 0
+let statusBarUsersRequestEpoch = 0
 let collapsedDragStarted = false
 let collapsedDragStartAt = 0
 
@@ -787,10 +794,21 @@ const formattedSelectedPoolResetItems = computed(() => (poolWindowType.value ===
   : adminMetrics.value.poolResetItems).map(formatPoolResetItem))
 const displayedUserRanking = computed(() => sortUserRanking(adminMetrics.value.userRanking, rankingMode.value))
 const sortedModelRanking = computed(() => sortModelRanking(modelRanking.value, modelRankingSort.value))
-const statusBarUserOptions = computed(() => (adminMetrics.value.userIdentities ?? []).map((user) => ({
+const statusBarUserOptions = computed(() => (isSettingsView
+  ? statusBarUsers.value
+  : adminMetrics.value.userIdentities ?? []).map((user) => ({
   id: user.id,
   label: formatUserIdentityLabel(user)
 })))
+const statusBarUserSelectDisabled = computed(() => statusBarUsersState.value !== 'ready'
+  || statusBarUserOptions.value.length === 0)
+const statusBarUserPlaceholder = computed(() => {
+  if (!hasAdmin.value) return '请先保存管理员配置'
+  if (statusBarUsersState.value === 'loading') return '正在加载用户...'
+  if (statusBarUsersState.value === 'error') return '用户加载失败，请检查配置'
+  if (statusBarUsersState.value === 'ready' && statusBarUserOptions.value.length === 0) return '暂无可选用户'
+  return '请选择用户'
+})
 const draftStatusBarUserExists = computed(() => draft.statusBarUserId === null
   || statusBarUserOptions.value.some((user) => user.id === draft.statusBarUserId))
 const draftStatusBarItems = computed(() => buildStatusBarDisplayItems(
@@ -907,7 +925,8 @@ async function refreshAdmin() {
   const adminRequest = fetchAdminMonitorMetrics({
     baseUrl: settings.value.sub2apiBaseUrl,
     apiKey: settings.value.adminApiKey,
-    poolGroupNames: settings.value.poolGroupNames
+    poolGroupNames: settings.value.poolGroupNames,
+    includeUserIdentities: !isSettingsView
   })
   const selectedUserId = settings.value.statusBarMetrics.includes('selectedUserUsage')
     ? settings.value.statusBarUserId
@@ -938,6 +957,31 @@ async function refreshAdmin() {
   const expandedUsers = adminMetrics.value.userRanking.filter((item) => isRankingUserExpanded(item))
   void Promise.allSettled(expandedUsers.map((item) => loadRankingUserModels(item, true)))
   if (rankingView.value === 'models') void loadModelRanking()
+}
+
+async function loadStatusBarUsers() {
+  if (!isSettingsView) return
+  const requestEpoch = ++statusBarUsersRequestEpoch
+  if (!hasAdmin.value) {
+    statusBarUsers.value = []
+    statusBarUsersState.value = 'idle'
+    return
+  }
+
+  statusBarUsersState.value = 'loading'
+  try {
+    const users = await fetchAdminUsers({
+      baseUrl: settings.value.sub2apiBaseUrl,
+      apiKey: settings.value.adminApiKey
+    })
+    if (requestEpoch !== statusBarUsersRequestEpoch) return
+    statusBarUsers.value = users
+    statusBarUsersState.value = 'ready'
+  } catch {
+    if (requestEpoch !== statusBarUsersRequestEpoch) return
+    statusBarUsers.value = []
+    statusBarUsersState.value = 'error'
+  }
 }
 
 function showUserRanking(mode: 'tokens' | 'cost') {
@@ -1415,6 +1459,7 @@ function saveDraft() {
   showSaveMessage()
   scheduleRefresh()
   void refreshAll()
+  void loadStatusBarUsers()
   void notifySettingsChanged()
 }
 
@@ -1481,6 +1526,7 @@ function applyLatestSettings() {
   syncSettingsDraft(settings.value)
   scheduleRefresh()
   void refreshAll()
+  void loadStatusBarUsers()
   void updateTrayStatus()
   void initFloatingWindow()
 }
@@ -1623,7 +1669,14 @@ function focusPoolGroupInput() {
 
 function scheduleRefresh() {
   if (timer !== null) window.clearInterval(timer)
-  timer = window.setInterval(refreshAll, settings.value.refreshSeconds * 1000)
+  timer = window.setInterval(refreshScheduledData, settings.value.refreshSeconds * 1000)
+}
+
+function refreshScheduledData() {
+  void refreshAll()
+  if (isSettingsView && statusBarUsersState.value !== 'ready') {
+    void loadStatusBarUsers()
+  }
 }
 
 async function startWindowDrag() {
@@ -1826,6 +1879,7 @@ onMounted(() => {
   void initAppVersion()
   scheduleRefresh()
   void refreshAll()
+  void loadStatusBarUsers()
   void initRuntimeListenersAndUpdateStatus()
   void initFloatingWindow()
   void resizePlatformWindowToContent()
