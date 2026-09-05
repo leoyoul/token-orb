@@ -48,4 +48,18 @@ describe('status bar display', () => {
       { model: 'b', requests: 2, tokens: 2_000, actualCost: 0.75 }
     ])).toEqual({ tokens: 3_000, actualCost: 1 })
   })
+
+  it('renders personal and global TPS independently in the selected order', () => {
+    const items = buildStatusBarDisplayItems({
+      statusBarMetrics: ['globalTps', 'personalTps']
+    }, metrics, null, {
+      personal: { state: 'ready', windowMinutes: 5, value: 42.34, sampleCount: 3, outputTokens: 100, generationMs: 2362, updatedAt: null },
+      global: { state: 'empty', windowMinutes: 1440, value: null, sampleCount: 0, outputTokens: 0, generationMs: 0, updatedAt: null }
+    })
+
+    expect(items).toEqual([
+      { key: 'globalTps', topText: '全局 昨日', bottomText: '-- TPS' },
+      { key: 'personalTps', topText: '个人 5次', bottomText: '42.3 TPS' }
+    ])
+  })
 })

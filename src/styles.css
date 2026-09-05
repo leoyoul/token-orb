@@ -145,6 +145,7 @@ select {
 
 .platform-shell {
   width: 410px;
+  max-width: 100vw;
   overflow: hidden;
   background: #0f172a;
 }
@@ -333,6 +334,7 @@ select {
 
 .monitor-panel {
   width: 410px;
+  max-width: 100vw;
   border: 1px solid rgba(148, 163, 184, 0.22);
   border-radius: 18px;
   background: #0f172a;
@@ -596,6 +598,90 @@ select {
   margin-top: 12px;
   border-top: 1px solid rgba(148, 163, 184, 0.16);
   padding-top: 12px;
+}
+
+.tps-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.tps-card {
+  min-width: 0;
+  min-height: 116px;
+  border: 1px solid rgba(96, 165, 250, 0.24);
+  border-radius: 8px;
+  background: rgba(15, 32, 50, 0.78);
+  padding: 11px 12px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.tps-card__header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tps-card__header span {
+  color: #e2e8f0;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.tps-card__header em {
+  flex: 0 0 auto;
+  color: #93c5fd;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 750;
+}
+
+.tps-card > strong {
+  display: block;
+  margin-top: 7px;
+  color: #38d9b2;
+  font-family: "SF Mono", "Cascadia Code", ui-monospace, monospace;
+  font-size: 21px;
+  font-weight: 850;
+  letter-spacing: 0;
+  line-height: 1.15;
+}
+
+.tps-card > p {
+  min-height: 16px;
+  margin: 5px 0 0;
+  overflow: hidden;
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tps-card > small {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: #7f91aa;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tps-card[data-state="error"] > strong,
+.tps-card[data-state="incomplete"] > strong {
+  color: #fbbf24;
+}
+
+@media (max-width: 360px) {
+  .tps-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .ranking-content {

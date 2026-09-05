@@ -109,8 +109,8 @@
           </label>
         </div>
 
-        <label v-if="draft.statusBarMetrics.includes('selectedUserUsage')" class="field status-bar-user-field">
-          <span>指定用户</span>
+        <label class="field status-bar-user-field">
+          <span>个人指标用户</span>
           <select
             v-model="draft.statusBarUserId"
             name="status-bar-user-id"
@@ -273,6 +273,26 @@
       </div>
 
       <div v-if="hasAdmin" class="ranking-box">
+        <div class="tps-grid" aria-label="生成速度">
+          <article class="tps-card" :data-state="personalTpsMetric.state">
+            <div class="tps-card__header">
+              <span>个人 TPS</span>
+              <em>最近 5 次</em>
+            </div>
+            <strong>{{ formatTpsValue(personalTpsMetric) }}</strong>
+            <p :title="selectedTpsUserLabel">{{ selectedTpsUserLabel }}</p>
+            <small>{{ formatTpsDetail(personalTpsMetric, true) }}</small>
+          </article>
+          <article class="tps-card" :data-state="globalTpsMetric.state">
+            <div class="tps-card__header">
+              <span>全局 TPS</span>
+              <em>昨日</em>
+            </div>
+            <strong>{{ formatTpsValue(globalTpsMetric) }}</strong>
+            <p>全部用户 · {{ globalTpsPeriodDate || '待更新' }}</p>
+            <small>{{ formatTpsDetail(globalTpsMetric) }}</small>
+          </article>
+        </div>
         <div class="section-title">
           <Users :size="16" />
           <span class="ranking-title-label">排行榜</span>
@@ -588,7 +608,7 @@
 
       <div class="orb__footer">
         <span>{{ footerText }}</span>
-        <button class="icon-button" type="button" title="刷新" :disabled="loading" @click.stop="refreshAll">
+        <button class="icon-button" type="button" title="刷新" :disabled="loading" @click.stop="manualRefresh">
           <RefreshCw :class="{ spinning: loading }" :size="15" />
         </button>
       </div>
@@ -615,7 +635,7 @@ import {
   Users,
   X
 } from 'lucide-vue-next'
-import { fetchAdminModelUsageRanking, fetchAdminModelUserUsage, fetchAdminMonitorMetrics, fetchAdminUserModelUsage, fetchAdminUsers, fetchSub2apiMetrics } from '@/domain/sub2apiClient'
+import { fetchAdminModelUsageRanking, fetchAdminModelUserUsage, fetchAdminMonitorMetrics, fetchAdminUsagePage, fetchAdminUserModelUsage, fetchAdminUsers, fetchSub2apiMetrics } from '@/domain/sub2apiClient'
 import {
   formatCost,
   formatFixedCost,
@@ -649,6 +669,23 @@ import {
   type AppSettings,
   type StatusBarMetricKey
 } from '@/domain/settings'
+import {
+  calculateTpsMetric,
+  calculateRecentTpsMetric,
+  createTpsWindowCache,
+  createTpsMetric,
+  errorTpsMetric,
+  isSuccessfulTextRecord,
+  loadTpsMetricWindow,
+  loadRecentTpsMetric,
+  resetTpsWindowCache,
+  TPS_SCHEMA_INCOMPATIBLE_CODE,
+  yesterdayTpsPeriod,
+  type TpsMetric,
+  type TpsWindowMinutes
+} from '@/domain/tpsMetrics'
+import { clearTpsCache, emptyTpsCache, loadTpsCache, saveTpsCache, type TpsCache, type TpsCacheBucket } from '@/domain/tpsCache'
+import { TpsScheduler, type TpsRequest } from '@/domain/tpsScheduler'
 
 type TauriWindowApi = typeof import('@tauri-apps/api/window')
 
@@ -669,7 +706,9 @@ const statusBarMetricOptions: Array<{ key: StatusBarMetricKey; label: string }> 
   { key: 'totalUsage', label: '总消耗' },
   { key: 'capacity', label: '容量' },
   { key: 'poolSevenDayRemaining', label: '7 日号池剩余量' },
-  { key: 'selectedUserUsage', label: '用户' }
+  { key: 'selectedUserUsage', label: '用户' },
+  { key: 'personalTps', label: '个人 TPS' },
+  { key: 'globalTps', label: '全局 TPS' }
 ]
 
 const floatingStorageKey = 'token-orb-floating-v1'
@@ -700,6 +739,9 @@ const adminMetrics = ref<AdminMonitorMetrics>({
   updatedAt: null
 })
 const selectedUserUsage = ref<SelectedUserUsage | null>(null)
+const personalTpsMetric = ref<TpsMetric>(createTpsMetric(5))
+const globalTpsMetric = ref<TpsMetric>(createTpsMetric(1440))
+const globalTpsPeriodDate = ref('')
 const statusBarUsers = ref<UserIdentityItem[]>([])
 const statusBarUsersState = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
 const view = new URLSearchParams(window.location.search).get('view') ?? 'personal'
@@ -708,7 +750,9 @@ const isPlatformView = view === 'platform'
 const isUpdaterView = view === 'updater'
 const isTrayMenuView = view === 'tray-menu'
 const isMainView = !isSettingsView && !isPlatformView && !isUpdaterView && !isTrayMenuView
-const isStatusBarPublisher = isMainView || isPlatformView
+const isTauriRuntime = '__TAURI_INTERNALS__' in window
+const isStatusBarPublisher = isMainView
+const ownsTpsScheduler = isMainView || (isPlatformView && !isTauriRuntime)
 const loading = ref(false)
 const errorMessage = ref('')
 const saveMessage = ref('')
@@ -743,6 +787,7 @@ const updateMessage = ref('点击重新检查获取最新版本。')
 const downloadPercent = ref<number | null>(null)
 let availableUpdate: import('@tauri-apps/plugin-updater').Update | null = null
 let timer: number | null = null
+let tpsTimer: number | null = null
 let platformUpdateTimer: number | null = null
 let saveMessageTimer: number | null = null
 const rankingModelUsageRequestEpochs = new Map<string, number>()
@@ -750,15 +795,40 @@ let modelRankingRefreshEpoch = 0
 let unlistenMoved: (() => void) | null = null
 let unlistenSettingsChanged: (() => void) | null = null
 let unlistenPlatformUpdateCheck: (() => void) | null = null
+let unlistenPlatformVisibility: (() => void) | null = null
+let unlistenTpsDemand: (() => void) | null = null
+let unlistenTpsUpdated: (() => void) | null = null
 let tauriWindowApi: TauriWindowApi | null = null
 let floatingWindowInitialized = false
 let checkingPlatformUpdate = false
 let adminRefreshEpoch = 0
 let statusBarUsersRequestEpoch = 0
+const personalTpsCache = createTpsWindowCache()
+const globalTpsCache = createTpsWindowCache()
+let tpsScheduler = new TpsScheduler({ platformVisible: isPlatformView })
+let persistedTpsCache: TpsCache = emptyTpsCache()
+let tpsCacheFingerprint = ''
+let tpsPlatformVisible = isPlatformView
+let tpsRequestQueue = Promise.resolve()
+let tpsPollActive = false
+const tpsDiagnostics: Array<{ at: string; event: string; scope?: string }> = []
+
+function traceTps(event: string, scope?: string) {
+  if (!ownsTpsScheduler) return
+  tpsDiagnostics.push({ at: new Date().toISOString(), event, scope })
+  if (tpsDiagnostics.length > 100) tpsDiagnostics.shift()
+  try {
+    localStorage.setItem('token-orb-tps-health-v1', JSON.stringify(tpsDiagnostics))
+  } catch {
+    // Diagnostics must never interrupt collection.
+  }
+}
 let collapsedDragStarted = false
 let collapsedDragStartAt = 0
 
 const platformUpdateCheckIntervalMs = 5 * 60 * 1000
+const tpsSchedulerTickMs = 15 * 1000
+const tpsCacheSchemaVersion = 3
 
 const hasAdmin = computed(() => hasAdminSettings(settings.value))
 const hasPersonal = computed(() => hasPersonalSettings(settings.value))
@@ -809,14 +879,27 @@ const statusBarUserPlaceholder = computed(() => {
   if (statusBarUsersState.value === 'ready' && statusBarUserOptions.value.length === 0) return '暂无可选用户'
   return '请选择用户'
 })
+const selectedTpsUserLabel = computed(() => {
+  const userId = settings.value.statusBarUserId
+  if (userId === null) return '请在设置中选择用户'
+  const user = (adminMetrics.value.userIdentities ?? []).find((item) => item.id === userId)
+  return user ? formatUserIdentityLabel(user) : `用户 #${userId}`
+})
 const draftStatusBarUserExists = computed(() => draft.statusBarUserId === null
   || statusBarUserOptions.value.some((user) => user.id === draft.statusBarUserId))
 const draftStatusBarItems = computed(() => buildStatusBarDisplayItems(
   draft,
   adminMetrics.value,
-  draft.statusBarUserId === settings.value.statusBarUserId ? selectedUserUsage.value : null
+  draft.statusBarUserId === settings.value.statusBarUserId ? selectedUserUsage.value : null,
+  {
+    personal: draft.statusBarUserId === settings.value.statusBarUserId ? personalTpsMetric.value : createTpsMetric(5),
+    global: globalTpsMetric.value
+  }
 ))
-const statusBarItems = computed(() => buildStatusBarDisplayItems(settings.value, adminMetrics.value, selectedUserUsage.value))
+const statusBarItems = computed(() => buildStatusBarDisplayItems(settings.value, adminMetrics.value, selectedUserUsage.value, {
+  personal: personalTpsMetric.value,
+  global: globalTpsMetric.value
+}))
 const filteredPoolAccountDetails = computed(() => {
   if (selectedAccountStatus.value === 'all') return adminMetrics.value.poolAccountDetails
   return adminMetrics.value.poolAccountDetails.filter((item) => item.status === selectedAccountStatus.value)
@@ -876,8 +959,13 @@ const platformUpdatedText = computed(() => {
 const updateBusy = computed(() => updateState.value === 'checking' || updateState.value === 'downloading')
 
 async function refreshAll() {
-  if (!hasAdmin.value && !hasPersonal.value) {
+  if (!hasAdmin.value) {
+    adminRefreshEpoch += 1
     selectedUserUsage.value = null
+    personalTpsMetric.value = createTpsMetric(5)
+    globalTpsMetric.value = createTpsMetric(1440)
+  }
+  if (!hasAdmin.value && !hasPersonal.value) {
     await updateTrayStatus()
     return
   }
@@ -928,25 +1016,29 @@ async function refreshAdmin() {
     poolGroupNames: settings.value.poolGroupNames,
     includeUserIdentities: !isSettingsView
   })
-  const selectedUserId = settings.value.statusBarMetrics.includes('selectedUserUsage')
-    ? settings.value.statusBarUserId
+  const selectedUserId = settings.value.statusBarUserId
+  const selectedUsageUserId = settings.value.statusBarMetrics.includes('selectedUserUsage')
+    ? selectedUserId
     : null
-  const selectedUserRequest = selectedUserId === null
+  const selectedUserRequest = selectedUsageUserId === null
     ? Promise.resolve(null)
     : fetchAdminUserModelUsage({
         baseUrl: settings.value.sub2apiBaseUrl,
         apiKey: settings.value.adminApiKey
-      }, selectedUserId).catch(() => null)
+      }, selectedUsageUserId).catch(() => null)
 
-  const [nextAdminMetrics, selectedUserModels] = await Promise.all([adminRequest, selectedUserRequest])
+  const [nextAdminMetrics, selectedUserModels] = await Promise.all([
+    adminRequest,
+    selectedUserRequest
+  ])
   if (refreshEpoch !== adminRefreshEpoch) return
   adminMetrics.value = nextAdminMetrics
-  if (selectedUserId !== null && selectedUserModels !== null) {
+  if (selectedUsageUserId !== null && selectedUserModels !== null) {
     selectedUserUsage.value = {
       ...aggregateUserModelUsage(selectedUserModels)
     }
-  } else if (selectedUserId !== null) {
-    const rankingUsage = nextAdminMetrics.userRanking.find((item) => item.userId === selectedUserId)
+  } else if (selectedUsageUserId !== null) {
+    const rankingUsage = nextAdminMetrics.userRanking.find((item) => item.userId === selectedUsageUserId)
     selectedUserUsage.value = rankingUsage
       ? { tokens: rankingUsage.tokens, actualCost: rankingUsage.actualCost }
       : null
@@ -957,6 +1049,274 @@ async function refreshAdmin() {
   const expandedUsers = adminMetrics.value.userRanking.filter((item) => isRankingUserExpanded(item))
   void Promise.allSettled(expandedUsers.map((item) => loadRankingUserModels(item, true)))
   if (rankingView.value === 'models') void loadModelRanking()
+}
+
+async function fetchTpsWindow(
+  windowMinutes: TpsWindowMinutes,
+  userId: number | undefined,
+  cache: ReturnType<typeof createTpsWindowCache>,
+  shouldContinue?: () => boolean
+): Promise<TpsMetric> {
+  const now = new Date()
+  const baseUrl = settings.value.sub2apiBaseUrl.trim()
+  const apiKey = settings.value.adminApiKey.trim()
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'
+  const cacheKey = tpsRuntimeCacheKey(windowMinutes, userId)
+  const fetchPage = async (query: import('@/domain/tpsMetrics').TpsUsagePageQuery) => {
+    traceTps('page-start', userId === undefined ? 'global' : 'personal')
+    const response = await fetchAdminUsagePage({ baseUrl, apiKey }, query)
+    traceTps('page-finish', userId === undefined ? 'global' : 'personal')
+    return response
+  }
+  if (userId !== undefined) return loadRecentTpsMetric({ windowMinutes: 5, userId, cache, cacheKey, now, timezone, pageDelayMs: 150, shouldContinue, fetchPage })
+  const period = yesterdayTpsPeriod(now)
+  const result = await loadTpsMetricWindow({
+    windowMinutes,
+    userId,
+    cache,
+    cacheKey,
+    now: period.end,
+    startAt: period.start,
+    endExclusive: true,
+    timezone,
+    pageDelayMs: 150,
+    shouldContinue,
+    fetchPage
+  })
+  return { ...result, updatedAt: now.toISOString() }
+}
+
+function tpsConfigFingerprint(): string {
+  if (!hasAdmin.value) return ''
+  const source = `${settings.value.sub2apiBaseUrl.trim()}\n${settings.value.adminApiKey.trim()}`
+  let hash = 0x811c9dc5
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return `v1-${(hash >>> 0).toString(16).padStart(8, '0')}`
+}
+
+function tpsRuntimeCacheKey(windowMinutes: TpsWindowMinutes, userId?: number): string {
+  return `${tpsCacheFingerprint}:${userId ?? 'global'}:${windowMinutes}:${userId === undefined ? yesterdayTpsPeriod().date : 'recent-5'}`
+}
+
+function hydrateTpsWindowCache(
+  cache: ReturnType<typeof createTpsWindowCache>,
+  bucket: TpsCacheBucket,
+  windowMinutes: TpsWindowMinutes,
+  userId?: number
+) {
+  cache.key = userId === undefined && windowMinutes === 1440
+    ? `${tpsCacheFingerprint}:global:1440:${bucket.periodDate ?? ''}`
+    : tpsRuntimeCacheKey(windowMinutes, userId)
+  cache.initialized = bucket.lastIncrementalAt !== null
+  cache.complete = bucket.lastCompleteAt !== null
+  cache.capped = bucket.capped === true
+  cache.records = [...bucket.records]
+}
+
+function syncTpsRuntimeContext() {
+  const fingerprint = tpsConfigFingerprint()
+  const personalEnabled = settings.value.statusBarUserId !== null && (tpsPlatformVisible || settings.value.statusBarMetrics.includes('personalTps'))
+  const globalEnabled = settings.value.statusBarMetrics.includes('globalTps')
+  if (fingerprint === tpsCacheFingerprint) {
+    tpsScheduler.setStatusEnabled('personal', personalEnabled)
+    tpsScheduler.setStatusEnabled('global', globalEnabled)
+    return
+  }
+
+  tpsCacheFingerprint = fingerprint
+  tpsScheduler = new TpsScheduler({
+    platformVisible: tpsPlatformVisible,
+    personalStatusEnabled: personalEnabled,
+    globalStatusEnabled: globalEnabled
+  })
+  resetTpsWindowCache(personalTpsCache)
+  resetTpsWindowCache(globalTpsCache)
+  if (fingerprint === '') {
+    persistedTpsCache = emptyTpsCache()
+    clearTpsCache()
+    return
+  }
+
+  persistedTpsCache = loadTpsCache({ configFingerprint: fingerprint, schemaVersion: tpsCacheSchemaVersion })
+  hydrateTpsWindowCache(globalTpsCache, persistedTpsCache.global, 1440)
+  const selectedUserId = settings.value.statusBarUserId ?? undefined
+  hydrateTpsWindowCache(personalTpsCache, persistedTpsCache.personal, 5, selectedUserId)
+  tpsScheduler.hydrate('global', {
+    lastIncrementalAt: persistedTpsCache.global.lastIncrementalAt ? new Date(persistedTpsCache.global.lastIncrementalAt) : null,
+    lastCompleteAt: persistedTpsCache.global.lastCompleteAt ? new Date(persistedTpsCache.global.lastCompleteAt) : null
+  })
+  tpsScheduler.hydrate('personal', {
+    lastIncrementalAt: persistedTpsCache.personal.lastIncrementalAt ? new Date(persistedTpsCache.personal.lastIncrementalAt) : null,
+    lastCompleteAt: persistedTpsCache.personal.lastCompleteAt ? new Date(persistedTpsCache.personal.lastCompleteAt) : null
+  })
+}
+
+function refreshTpsMetricsFromCache() {
+  syncTpsRuntimeContext()
+  if (!ownsTpsScheduler && tpsCacheFingerprint) {
+    persistedTpsCache = loadTpsCache({ configFingerprint: tpsCacheFingerprint, schemaVersion: tpsCacheSchemaVersion })
+    hydrateTpsWindowCache(globalTpsCache, persistedTpsCache.global, 1440)
+    hydrateTpsWindowCache(personalTpsCache, persistedTpsCache.personal, 5, settings.value.statusBarUserId ?? undefined)
+  }
+  if (!hasAdmin.value) {
+    personalTpsMetric.value = createTpsMetric(5)
+    globalTpsMetric.value = createTpsMetric(1440)
+    return
+  }
+
+  const now = new Date()
+  const period = yesterdayTpsPeriod(now)
+  globalTpsPeriodDate.value = persistedTpsCache.global.periodDate ?? ''
+  globalTpsMetric.value = globalTpsCache.initialized && globalTpsPeriodDate.value === period.date
+    ? calculateTpsMetric(globalTpsCache.records, { windowMinutes: 1440, now: period.end, startAt: period.start, endExclusive: true, incomplete: !globalTpsCache.complete })
+    : createTpsMetric(1440)
+  globalTpsMetric.value.updatedAt = persistedTpsCache.global.lastIncrementalAt
+  const selectedUserId = settings.value.statusBarUserId
+  if (selectedUserId === null) {
+    personalTpsMetric.value = createTpsMetric(5)
+  } else if (personalTpsCache.initialized) {
+    personalTpsMetric.value = calculateRecentTpsMetric(personalTpsCache.records, selectedUserId, now, !personalTpsCache.complete)
+    personalTpsMetric.value.updatedAt = persistedTpsCache.personal.lastIncrementalAt
+  } else {
+    personalTpsMetric.value = createTpsMetric(5)
+  }
+  if (!ownsTpsScheduler) {
+    try {
+      const snapshot = JSON.parse(localStorage.getItem('token-orb-tps-snapshot-v3') ?? 'null')
+      if (snapshot?.fingerprint === tpsCacheFingerprint) {
+        if (snapshot.userId === selectedUserId && snapshot.personal) personalTpsMetric.value = snapshot.personal
+        if (snapshot.date === period.date && snapshot.global) {
+          globalTpsMetric.value = snapshot.global
+          globalTpsPeriodDate.value = snapshot.date
+        }
+      }
+    } catch {
+      // A malformed snapshot must not replace the record cache.
+    }
+  }
+}
+
+function persistTpsRuntimeCache(request: TpsRequest) {
+  const bucket = request.scope === 'global' ? persistedTpsCache.global : persistedTpsCache.personal
+  const runtimeCache = request.scope === 'global' ? globalTpsCache : personalTpsCache
+  const now = new Date().toISOString()
+  bucket.records = runtimeCache.records.filter(isSuccessfulTextRecord)
+  if (request.scope === 'personal') bucket.records = bucket.records.slice(0, 5)
+  else bucket.periodDate = yesterdayTpsPeriod(new Date(request.requestedAt)).date
+  bucket.capped = runtimeCache.capped === true
+  bucket.lastIncrementalAt = request.scope === 'global' && !runtimeCache.complete && !runtimeCache.capped ? null : now
+  bucket.lastCompleteAt = runtimeCache.complete ? now : null
+  persistedTpsCache = saveTpsCache(persistedTpsCache, {
+    configFingerprint: tpsCacheFingerprint,
+    schemaVersion: tpsCacheSchemaVersion
+  })
+}
+
+function tpsScopeStillNeeded(scope: 'personal' | 'global'): boolean {
+  if (scope === 'global') return tpsPlatformVisible
+  return settings.value.statusBarUserId !== null && (tpsPlatformVisible || settings.value.statusBarMetrics.includes('personalTps'))
+}
+
+async function executeTpsRequest(request: TpsRequest) {
+  traceTps('execute', request.scope)
+  const scheduler = tpsScheduler
+  if (scheduler.getInFlight(request.scope) !== request) return
+  const fingerprint = tpsCacheFingerprint
+  const selectedAtStart = settings.value.statusBarUserId
+  const targetCache = request.scope === 'global' ? globalTpsCache : personalTpsCache
+  const requestCache = { ...targetCache, records: [...targetCache.records] }
+  if (!hasAdmin.value || !tpsScopeStillNeeded(request.scope)) {
+    tpsScheduler.settle(request, 'cancelled')
+    return
+  }
+  try {
+    if (request.scope === 'global') {
+      await fetchTpsWindow(1440, undefined, requestCache, () => fingerprint === tpsConfigFingerprint() && tpsScopeStillNeeded('global'))
+    } else {
+      const selectedUserId = settings.value.statusBarUserId
+      if (selectedUserId === null) {
+        tpsScheduler.settle(request, 'success')
+        return
+      }
+      await fetchTpsWindow(5, selectedUserId, requestCache, () => fingerprint === tpsConfigFingerprint() && selectedUserId === settings.value.statusBarUserId && tpsScopeStillNeeded('personal'))
+    }
+    if (scheduler !== tpsScheduler || fingerprint !== tpsConfigFingerprint()) return
+    if (request.scope === 'personal' && selectedAtStart !== settings.value.statusBarUserId) {
+      scheduler.settle(request, 'success')
+      refreshTpsMetricsFromCache()
+      return
+    }
+    Object.assign(targetCache, requestCache)
+    persistTpsRuntimeCache(request)
+    const runtimeCache = request.scope === 'global' ? globalTpsCache : personalTpsCache
+    tpsScheduler.settle(request, runtimeCache.complete || runtimeCache.capped ? 'success' : 'cancelled')
+    refreshTpsMetricsFromCache()
+    await publishTpsUpdate()
+    await updateTrayStatus()
+
+  } catch (error) {
+    traceTps('request-error', request.scope)
+    if (scheduler !== tpsScheduler || fingerprint !== tpsConfigFingerprint()) return
+    tpsScheduler.settle(request, 'failure')
+    const failedMetric = errorTpsMetric(error, request.scope === 'global' ? 1440 : 5)
+    if (request.scope === 'global') globalTpsMetric.value = failedMetric
+    else personalTpsMetric.value = failedMetric
+    await publishTpsUpdate()
+    await updateTrayStatus()
+  }
+}
+
+function enqueueTpsRequests(requests: TpsRequest[]) {
+  if (requests.length === 0) return
+  tpsRequestQueue = tpsRequestQueue.then(async () => {
+    for (const request of requests) await executeTpsRequest(request)
+  }).catch(() => undefined)
+}
+
+async function pollTpsScheduler() {
+  if (!ownsTpsScheduler || tpsPollActive) return
+  tpsPollActive = true
+  try {
+    if (isTauriRuntime) {
+      const { invoke } = await import('@tauri-apps/api/core')
+      const visible = await invoke<boolean>('platform_is_visible')
+      if (typeof visible === 'boolean' && visible !== tpsPlatformVisible) {
+        tpsPlatformVisible = visible
+        tpsScheduler.setPlatformVisible(visible)
+        syncTpsRuntimeContext()
+        traceTps(visible ? 'platform-open-poll' : 'platform-hide-poll')
+        if (visible) enqueueTpsRequests(tpsScheduler.platformOpened())
+      }
+    }
+    syncTpsRuntimeContext()
+    enqueueTpsRequests(tpsScheduler.poll())
+  } finally {
+    tpsPollActive = false
+  }
+}
+
+async function publishTpsUpdate() {
+  try {
+    localStorage.setItem('token-orb-tps-snapshot-v3', JSON.stringify({
+      fingerprint: tpsCacheFingerprint,
+      userId: settings.value.statusBarUserId,
+      date: yesterdayTpsPeriod().date,
+      personal: { ...personalTpsMetric.value, error: undefined },
+      global: { ...globalTpsMetric.value, error: undefined }
+    }))
+  } catch {
+    // IPC still publishes the snapshot when storage is unavailable.
+  }
+  if (!isTauriRuntime || !isMainView) return
+  try {
+    const { emit } = await import('@tauri-apps/api/event')
+    await emit('token-orb-tps-updated', { personal: personalTpsMetric.value, global: globalTpsMetric.value, userId: settings.value.statusBarUserId })
+  } catch {
+    // 平台窗口也会在下个调度周期重新读取缓存。
+  }
 }
 
 async function loadStatusBarUsers() {
@@ -1348,9 +1708,74 @@ async function listenForPlatformUpdateChecks() {
   }
 }
 
+async function requestTpsFromMain(manual = false) {
+  if (!isPlatformView) return
+  if (!isTauriRuntime) {
+    const request = manual ? tpsScheduler.requestManual('personal') : null
+    enqueueTpsRequests(manual ? (request ? [request] : []) : tpsScheduler.platformOpened())
+    return
+  }
+  try {
+    const { emit } = await import('@tauri-apps/api/event')
+    await emit('token-orb-tps-demand', { manual })
+  } catch {
+    // 缓存中的最近结果仍可继续展示。
+  }
+}
+
+async function listenForTpsRuntimeEvents() {
+  if (!isTauriRuntime) return
+  try {
+    const { listen } = await import('@tauri-apps/api/event')
+    if (isMainView) {
+      traceTps('register-owner')
+      unlistenPlatformVisibility = await listen<boolean>('token-orb-platform-visibility', (event) => {
+        tpsPlatformVisible = event.payload === true
+        traceTps(tpsPlatformVisible ? 'platform-open' : 'platform-hide')
+        tpsScheduler.setPlatformVisible(tpsPlatformVisible)
+        syncTpsRuntimeContext()
+        if (tpsPlatformVisible) enqueueTpsRequests(tpsScheduler.platformOpened())
+      })
+      unlistenTpsDemand = await listen<{ manual?: boolean }>('token-orb-tps-demand', (event) => {
+        traceTps('platform-demand')
+        tpsPlatformVisible = true
+        tpsScheduler.setPlatformVisible(true)
+        syncTpsRuntimeContext()
+        const request = event.payload?.manual ? tpsScheduler.requestManual('personal') : null
+        enqueueTpsRequests(event.payload?.manual ? (request ? [request] : []) : tpsScheduler.platformOpened())
+      })
+    } else if (isPlatformView) {
+      unlistenTpsUpdated = await listen<{ personal: TpsMetric; global: TpsMetric; userId: number | null }>('token-orb-tps-updated', (event) => {
+        refreshTpsMetricsFromCache()
+        if (event.payload.userId === settings.value.statusBarUserId) personalTpsMetric.value = event.payload.personal
+        globalTpsMetric.value = event.payload.global
+      })
+    }
+  } catch {
+    traceTps('event-error')
+    // 非原生预览或事件通道不可用时由本地缓存兜底。
+  }
+}
+
+function scheduleTpsRefresh() {
+  if (!ownsTpsScheduler && !isPlatformView) return
+  if (tpsTimer !== null) window.clearInterval(tpsTimer)
+  tpsTimer = window.setInterval(() => {
+    if (ownsTpsScheduler) void pollTpsScheduler()
+    else refreshTpsMetricsFromCache()
+  }, tpsSchedulerTickMs)
+}
+
+async function manualRefresh() {
+  await refreshAll()
+  await requestTpsFromMain(true)
+}
+
 async function initRuntimeListenersAndUpdateStatus() {
   await listenForSettingsChanges()
   await listenForPlatformUpdateChecks()
+  await listenForTpsRuntimeEvents()
+  if (isPlatformView) await requestTpsFromMain(false)
   schedulePlatformUpdateChecks()
   await checkPlatformUpdate()
 }
@@ -1458,6 +1883,7 @@ function saveDraft() {
   personalTokenTestState.value = ''
   showSaveMessage()
   scheduleRefresh()
+  refreshTpsMetricsFromCache()
   void refreshAll()
   void loadStatusBarUsers()
   void notifySettingsChanged()
@@ -1469,6 +1895,24 @@ function formatUserIdentityLabel(user: UserIdentityItem, includeEmail = true): s
   if (!includeEmail) return username || `用户 #${user.id}`
   if (includeEmail && username && email) return `${username}（${email}）`
   return username || email || `用户 #${user.id}`
+}
+
+function formatTpsValue(metric: TpsMetric): string {
+  return metric.state === 'ready' && metric.value !== null ? `${metric.value.toFixed(1)} TPS` : '-- TPS'
+}
+
+function formatTpsDetail(metric: TpsMetric, requiresUser = false): string {
+  if (requiresUser && settings.value.statusBarUserId === null) return '请先选择个人指标用户'
+  if (metric.state === 'loading') return '正在计算...'
+  if (metric.errorCode === TPS_SCHEMA_INCOMPATIBLE_CODE) return '数据格式不兼容'
+  if (metric.state === 'error') return '数据加载失败'
+  if (metric.state === 'incomplete') return '数据不完整，暂时无法统计'
+  if (metric.state === 'empty') return '暂无有效文本请求'
+  const updatedAt = metric.updatedAt ? new Date(metric.updatedAt) : null
+  const time = updatedAt && Number.isFinite(updatedAt.getTime())
+    ? updatedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+    : '--:--'
+  return `${metric.sampleCount} 条样本 · ${time} 更新`
 }
 
 async function testPersonalToken() {
@@ -1525,6 +1969,7 @@ function applyLatestSettings() {
   settings.value = loadSettings()
   syncSettingsDraft(settings.value)
   scheduleRefresh()
+  refreshTpsMetricsFromCache()
   void refreshAll()
   void loadStatusBarUsers()
   void updateTrayStatus()
@@ -1877,10 +2322,13 @@ onMounted(() => {
     return
   }
   void initAppVersion()
+  refreshTpsMetricsFromCache()
   scheduleRefresh()
+  scheduleTpsRefresh()
   void refreshAll()
   void loadStatusBarUsers()
   void initRuntimeListenersAndUpdateStatus()
+  if (ownsTpsScheduler) pollTpsScheduler()
   void initFloatingWindow()
   void resizePlatformWindowToContent()
 })
@@ -1896,10 +2344,14 @@ watch([updateState, updateBody, downloadPercent], () => {
 onBeforeUnmount(() => {
   window.removeEventListener('storage', syncExternalSettingsChange)
   if (timer !== null) window.clearInterval(timer)
+  if (tpsTimer !== null) window.clearInterval(tpsTimer)
   if (platformUpdateTimer !== null) window.clearInterval(platformUpdateTimer)
   if (saveMessageTimer !== null) window.clearTimeout(saveMessageTimer)
   if (unlistenMoved) unlistenMoved()
   if (unlistenSettingsChanged) unlistenSettingsChanged()
   if (unlistenPlatformUpdateCheck) unlistenPlatformUpdateCheck()
+  if (unlistenPlatformVisibility) unlistenPlatformVisibility()
+  if (unlistenTpsDemand) unlistenTpsDemand()
+  if (unlistenTpsUpdated) unlistenTpsUpdated()
 })
 </script>

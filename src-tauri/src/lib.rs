@@ -31,7 +31,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![sub2api_request, tray_command, set_tray_status_image])
+        .invoke_handler(tauri::generate_handler![sub2api_request, tray_command, set_tray_status_image, platform_is_visible])
         .setup(|app| {
             let handle = app.handle().clone();
             if let Some(window) = app.get_webview_window("main") {
@@ -77,6 +77,13 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running token orb");
+}
+
+#[tauri::command]
+fn platform_is_visible(app: AppHandle) -> bool {
+    app.get_webview_window("platform")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -171,6 +178,13 @@ async fn sub2api_request(request: Sub2apiRequest) -> Result<serde_json::Value, S
         _ => return Err(format!("sub2api 不支持的请求方法: {method}")),
     };
 
+    if reqwest::Url::parse(&request.url)
+        .map(|url| url.path().ends_with("/api/v1/admin/usage"))
+        .unwrap_or(false)
+    {
+        builder = builder.timeout(std::time::Duration::from_secs(20));
+    }
+
     for (key, value) in request.headers {
         builder = builder.header(key, value);
     }
@@ -243,11 +257,13 @@ fn toggle_monitor<R: Runtime>(app: &AppHandle<R>, tray_rect: Option<tauri::Rect>
     if let Some(window) = app.get_webview_window("platform") {
         if window.is_visible().unwrap_or(false) {
             let _ = window.hide();
+            let _ = app.emit_to("main", "token-orb-platform-visibility", false);
         } else {
             position_monitor(app, &window, tray_rect);
             let _ = window.show();
             let _ = window.set_focus();
             let _ = window.emit("token-orb-check-platform-update", ());
+            let _ = app.emit_to("main", "token-orb-platform-visibility", true);
         }
         return;
     }
@@ -267,6 +283,7 @@ fn toggle_monitor<R: Runtime>(app: &AppHandle<R>, tray_rect: Option<tauri::Rect>
         position_monitor(app, &window, tray_rect);
         let _ = window.show();
         let _ = window.set_focus();
+        let _ = app.emit_to("main", "token-orb-platform-visibility", true);
     }
 }
 

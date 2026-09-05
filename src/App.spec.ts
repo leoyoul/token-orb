@@ -1,8 +1,8 @@
-import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App.vue'
 import { settingsStorageKey, type AppSettings } from '@/domain/settings'
-import { fetchAdminModelUsageRanking, fetchAdminModelUserUsage, fetchAdminMonitorMetrics, fetchAdminUserModelUsage, fetchAdminUsers, fetchSub2apiMetrics } from '@/domain/sub2apiClient'
+import { fetchAdminModelUsageRanking, fetchAdminModelUserUsage, fetchAdminMonitorMetrics, fetchAdminUsagePage, fetchAdminUserModelUsage, fetchAdminUsers, fetchSub2apiMetrics } from '@/domain/sub2apiClient'
 
 const { checkForAvailableUpdate, emitTauriEvent, getPlatformUpdateCheckListener, getSettingsUpdatedListener, getAppVersion, hidePersonalFloatingOrb, invokeTauriCommand, listenTauriEvent, openReleaseNotes, resetTauriEventListeners, tauriWindow } = vi.hoisted(() => {
   let platformUpdateCheckListener: (() => void) | undefined
@@ -15,7 +15,7 @@ const { checkForAvailableUpdate, emitTauriEvent, getPlatformUpdateCheckListener,
   const getAppVersion = vi.fn(async () => '0.4.3')
   const openReleaseNotes = vi.fn(async () => undefined)
   const emitTauriEvent = vi.fn(async () => undefined)
-  const invokeTauriCommand = vi.fn(async () => undefined)
+  const invokeTauriCommand = vi.fn<(...args: unknown[]) => Promise<unknown>>(async () => undefined)
   const listenTauriEvent = vi.fn(async (eventName: string, listener: () => void) => {
     if (eventName === 'token-orb-settings-updated') {
       settingsUpdatedListener = listener
@@ -98,6 +98,7 @@ vi.mock('@/domain/sub2apiClient', () => ({
     updatedAt: new Date().toISOString()
   })),
   fetchAdminUserModelUsage: vi.fn(async () => []),
+  fetchAdminUsagePage: vi.fn(async () => ({ items: [], total: 0 })),
   fetchAdminUsers: vi.fn(async () => []),
   fetchAdminModelUsageRanking: vi.fn(async () => []),
   fetchAdminModelUserUsage: vi.fn(async () => [])
@@ -145,6 +146,11 @@ const baseSettings: AppSettings = {
   refreshSeconds: 10
 }
 
+enableAutoUnmount(afterEach)
+afterEach(() => {
+  vi.clearAllTimers()
+})
+
 describe('App settings sync', () => {
   beforeEach(() => {
     vi.useFakeTimers()
@@ -154,6 +160,7 @@ describe('App settings sync', () => {
     Object.defineProperty(window, 'localStorage', { configurable: true, value: localStorageMock })
     localStorage.clear()
     vi.mocked(fetchAdminUsers).mockResolvedValue([])
+    vi.mocked(fetchAdminUsagePage).mockResolvedValue({ items: [], total: 0 })
     delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
     window.history.replaceState({}, '', '/?view=platform')
   })
@@ -183,6 +190,111 @@ describe('App settings sync', () => {
     expect(fetchAdminMonitorMetrics).toHaveBeenLastCalledWith(expect.objectContaining({
       poolGroupNames: ['新分组', '备用分组']
     }))
+  })
+
+  it('shows personal and global TPS cards above the ranking for the configured user', async () => {
+    vi.setSystemTime(new Date('2026-09-05T12:00:00.000Z'))
+    vi.mocked(fetchAdminMonitorMetrics).mockResolvedValueOnce({
+      todayTotalTokens: null,
+      todayTotalCost: null,
+      poolRemainingPercent: null,
+      poolLatestResetAt: null,
+      poolResetItems: [],
+      poolAccounts: null,
+      poolCapacity: null,
+      poolAccountDetails: [],
+      userRanking: [],
+      userIdentities: [{ id: 7, username: '测试用户', email: 'user@example.com' }],
+      updatedAt: '2026-09-05T12:00:00.000Z'
+    })
+    vi.mocked(fetchAdminUsagePage).mockImplementation(async (_config, query) => ({
+      items: [{
+        id: 'global',
+        user_id: 7,
+        created_at: query.userId === undefined ? '2026-09-04T11:59:00.000Z' : '2026-09-05T11:59:00.000Z',
+        status_code: 200,
+        output_tokens: 300,
+        duration_ms: 12_000,
+        first_token_ms: 2_000
+      }],
+      total: 1
+    }))
+    localStorage.setItem(settingsStorageKey, JSON.stringify({ ...baseSettings, statusBarUserId: 7 }))
+
+    const wrapper = mount(App)
+    await flushPromises()
+
+    const cards = wrapper.findAll('.tps-card')
+    expect(cards).toHaveLength(2)
+    expect(cards[0].text()).toContain('个人 TPS')
+    expect(cards[0].text()).toContain('30.0 TPS')
+    expect(cards[0].text()).toContain('测试用户（user@example.com）')
+    expect(cards[1].text()).toContain('全局 TPS')
+    expect(cards[1].text()).toContain('30.0 TPS')
+    expect(wrapper.get('.ranking-box').element.firstElementChild?.classList.contains('tps-grid')).toBe(true)
+    expect(vi.mocked(fetchAdminUsagePage).mock.calls.some(([, query]) => query.userId === 7)).toBe(true)
+    expect(vi.mocked(fetchAdminUsagePage).mock.calls.some(([, query]) => query.userId === undefined)).toBe(true)
+  })
+
+  it('always exposes the personal metric user and independent TPS status bar options', async () => {
+    window.history.replaceState({}, '', '/?view=settings')
+    localStorage.setItem(settingsStorageKey, JSON.stringify(baseSettings))
+
+    const wrapper = mount(App)
+    await flushPromises()
+
+    expect(wrapper.find('select[name="status-bar-user-id"]').exists()).toBe(true)
+    expect(wrapper.find('input[value="personalTps"]').exists()).toBe(true)
+    expect(wrapper.find('input[value="globalTps"]').exists()).toBe(true)
+  })
+
+  it('keeps personal TPS low-frequency and fetches the daily global only once', async () => {
+    vi.setSystemTime(new Date('2026-09-05T12:00:00Z'))
+    const selected = { ...baseSettings, statusBarUserId: 7 }
+    localStorage.setItem(settingsStorageKey, JSON.stringify(selected))
+    vi.mocked(fetchAdminUsagePage).mockImplementation(async () => ({
+      items: [7, 8].map((userId) => ({
+        id: userId, user_id: userId, created_at: new Date().toISOString(),
+        request_type: 'stream', output_tokens: userId * 10, duration_ms: 2000, first_token_ms: 1000
+      })), total: 2
+    }))
+    const wrapper = mount(App)
+    await flushPromises()
+    expect(fetchAdminUsagePage).toHaveBeenCalledTimes(2)
+    localStorage.setItem(settingsStorageKey, JSON.stringify({ ...selected, statusBarUserId: 8 }))
+    window.dispatchEvent(new StorageEvent('storage', { key: settingsStorageKey, newValue: 'changed' }))
+    await flushPromises()
+    expect(wrapper.findAll('.tps-card')[0].text()).toContain('80.0 TPS')
+    expect(fetchAdminUsagePage).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(600_000)
+    expect(vi.mocked(fetchAdminUsagePage).mock.calls.length).toBeLessThanOrEqual(12)
+    expect(vi.mocked(fetchAdminUsagePage).mock.calls.filter(([, query]) => query.userId === undefined)).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('does not request TPS in a hidden main window with both status metrics disabled', async () => {
+    window.history.replaceState({}, '', '/?view=personal')
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: {} })
+    localStorage.setItem(settingsStorageKey, JSON.stringify(baseSettings))
+    const wrapper = mount(App)
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(600_000)
+    expect(fetchAdminUsagePage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('recovers native TPS demand from window visibility when no cross-window event arrives', async () => {
+    window.history.replaceState({}, '', '/?view=personal')
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: {} })
+    localStorage.setItem(settingsStorageKey, JSON.stringify({ ...baseSettings, statusBarUserId: 7 }))
+    invokeTauriCommand.mockImplementation(async (command?: unknown) => command === 'platform_is_visible' ? true : undefined)
+    const wrapper = mount(App)
+    await flushPromises()
+    expect(vi.mocked(fetchAdminUsagePage).mock.calls.map(([, query]) => query.userId)).toEqual([7, undefined])
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(vi.mocked(fetchAdminUsagePage).mock.calls.filter(([, query]) => query.userId === undefined)).toHaveLength(1)
+    wrapper.unmount()
+    invokeTauriCommand.mockImplementation(async () => undefined)
   })
 
   it('uses a 410px platform window to keep the account summary on one line', async () => {
@@ -286,7 +398,7 @@ describe('App settings sync', () => {
     expect(emitTauriEvent).toHaveBeenCalledWith('token-orb-settings-updated')
   })
 
-  it('configures five status bar metrics and persists a selected user id', async () => {
+  it('configures seven status bar metrics and persists a selected user id', async () => {
     window.history.replaceState({}, '', '/?view=settings')
     localStorage.setItem(settingsStorageKey, JSON.stringify(baseSettings))
     vi.mocked(fetchAdminMonitorMetrics).mockResolvedValueOnce({
@@ -316,8 +428,8 @@ describe('App settings sync', () => {
     }))
 
     const metricInputs = wrapper.findAll('.status-bar-option input[type="checkbox"]')
-    expect(metricInputs).toHaveLength(5)
-    expect(wrapper.find('select[name="status-bar-user-id"]').exists()).toBe(false)
+    expect(metricInputs).toHaveLength(7)
+    expect(wrapper.find('select[name="status-bar-user-id"]').exists()).toBe(true)
 
     await wrapper.get('input[name="status-bar-todayUsage"]').setValue(true)
     await wrapper.get('input[name="status-bar-selectedUserUsage"]').setValue(true)
@@ -374,7 +486,7 @@ describe('App settings sync', () => {
   })
 
   it('publishes valid platform metrics and falls back to the matching user ranking', async () => {
-    window.history.replaceState({}, '', '/?view=platform')
+    window.history.replaceState({}, '', '/?view=personal')
     Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: {} })
     localStorage.setItem(settingsStorageKey, JSON.stringify({
       ...baseSettings,
