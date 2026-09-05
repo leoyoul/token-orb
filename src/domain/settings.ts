@@ -3,7 +3,9 @@ export const statusBarMetricKeys = [
   'totalUsage',
   'capacity',
   'poolSevenDayRemaining',
-  'selectedUserUsage'
+  'selectedUserUsage',
+  'personalTps',
+  'globalTps'
 ] as const
 
 export type StatusBarMetricKey = typeof statusBarMetricKeys[number]

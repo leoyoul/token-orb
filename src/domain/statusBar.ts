@@ -6,6 +6,7 @@ import {
   type AdminMonitorMetrics,
   type UserModelUsageItem
 } from './tokenMetrics'
+import type { TpsMetric } from './tpsMetrics'
 
 export interface SelectedUserUsage {
   tokens: number | null
@@ -16,6 +17,11 @@ export interface StatusBarDisplayItem {
   key: StatusBarMetricKey
   topText: string
   bottomText: string
+}
+
+export interface StatusBarTpsMetrics {
+  personal: TpsMetric
+  global: TpsMetric
 }
 
 export function aggregateUserModelUsage(items: UserModelUsageItem[]): Pick<SelectedUserUsage, 'tokens' | 'actualCost'> {
@@ -30,7 +36,8 @@ export function aggregateUserModelUsage(items: UserModelUsageItem[]): Pick<Selec
 export function buildStatusBarDisplayItems(
   settings: Pick<AppSettings, 'statusBarMetrics'>,
   metrics: AdminMonitorMetrics,
-  selectedUser: SelectedUserUsage | null
+  selectedUser: SelectedUserUsage | null,
+  tpsMetrics?: StatusBarTpsMetrics
 ): StatusBarDisplayItem[] {
   const itemByKey: Record<StatusBarMetricKey, StatusBarDisplayItem | null> = {
     todayUsage: {
@@ -63,12 +70,26 @@ export function buildStatusBarDisplayItems(
           key: 'selectedUserUsage',
           topText: '用户 --',
           bottomText: '--'
-        }
+        },
+    personalTps: {
+      key: 'personalTps',
+      topText: '个人 5m',
+      bottomText: formatTps(tpsMetrics?.personal.value ?? null)
+    },
+    globalTps: {
+      key: 'globalTps',
+      topText: '全局 24h',
+      bottomText: formatTps(tpsMetrics?.global.value ?? null)
+    }
   }
 
   return settings.statusBarMetrics
     .map((key) => itemByKey[key])
     .filter((item): item is StatusBarDisplayItem => item !== null)
+}
+
+function formatTps(value: number | null): string {
+  return value === null || !Number.isFinite(value) ? '-- TPS' : `${value.toFixed(1)} TPS`
 }
 
 function formatRemainingPercent(value: number | null): string {

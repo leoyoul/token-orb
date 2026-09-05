@@ -109,8 +109,8 @@
           </label>
         </div>
 
-        <label v-if="draft.statusBarMetrics.includes('selectedUserUsage')" class="field status-bar-user-field">
-          <span>指定用户</span>
+        <label class="field status-bar-user-field">
+          <span>个人指标用户</span>
           <select
             v-model="draft.statusBarUserId"
             name="status-bar-user-id"
@@ -273,6 +273,26 @@
       </div>
 
       <div v-if="hasAdmin" class="ranking-box">
+        <div class="tps-grid" aria-label="生成速度">
+          <article class="tps-card" :data-state="personalTpsMetric.state">
+            <div class="tps-card__header">
+              <span>个人 TPS</span>
+              <em>近 5 分钟</em>
+            </div>
+            <strong>{{ formatTpsValue(personalTpsMetric) }}</strong>
+            <p :title="selectedTpsUserLabel">{{ selectedTpsUserLabel }}</p>
+            <small>{{ formatTpsDetail(personalTpsMetric, true) }}</small>
+          </article>
+          <article class="tps-card" :data-state="globalTpsMetric.state">
+            <div class="tps-card__header">
+              <span>全局 TPS</span>
+              <em>近 24 小时</em>
+            </div>
+            <strong>{{ formatTpsValue(globalTpsMetric) }}</strong>
+            <p>全部用户</p>
+            <small>{{ formatTpsDetail(globalTpsMetric) }}</small>
+          </article>
+        </div>
         <div class="section-title">
           <Users :size="16" />
           <span class="ranking-title-label">排行榜</span>
@@ -615,7 +635,7 @@ import {
   Users,
   X
 } from 'lucide-vue-next'
-import { fetchAdminModelUsageRanking, fetchAdminModelUserUsage, fetchAdminMonitorMetrics, fetchAdminUserModelUsage, fetchAdminUsers, fetchSub2apiMetrics } from '@/domain/sub2apiClient'
+import { fetchAdminModelUsageRanking, fetchAdminModelUserUsage, fetchAdminMonitorMetrics, fetchAdminUsagePage, fetchAdminUserModelUsage, fetchAdminUsers, fetchSub2apiMetrics } from '@/domain/sub2apiClient'
 import {
   formatCost,
   formatFixedCost,
@@ -649,6 +669,16 @@ import {
   type AppSettings,
   type StatusBarMetricKey
 } from '@/domain/settings'
+import {
+  createTpsWindowCache,
+  createTpsMetric,
+  errorTpsMetric,
+  loadTpsMetricWindow,
+  loadingTpsMetric,
+  resetTpsWindowCache,
+  type TpsMetric,
+  type TpsWindowMinutes
+} from '@/domain/tpsMetrics'
 
 type TauriWindowApi = typeof import('@tauri-apps/api/window')
 
@@ -669,7 +699,9 @@ const statusBarMetricOptions: Array<{ key: StatusBarMetricKey; label: string }> 
   { key: 'totalUsage', label: '总消耗' },
   { key: 'capacity', label: '容量' },
   { key: 'poolSevenDayRemaining', label: '7 日号池剩余量' },
-  { key: 'selectedUserUsage', label: '用户' }
+  { key: 'selectedUserUsage', label: '用户' },
+  { key: 'personalTps', label: '个人 TPS' },
+  { key: 'globalTps', label: '全局 TPS' }
 ]
 
 const floatingStorageKey = 'token-orb-floating-v1'
@@ -700,6 +732,8 @@ const adminMetrics = ref<AdminMonitorMetrics>({
   updatedAt: null
 })
 const selectedUserUsage = ref<SelectedUserUsage | null>(null)
+const personalTpsMetric = ref<TpsMetric>(createTpsMetric(5))
+const globalTpsMetric = ref<TpsMetric>(createTpsMetric(1440))
 const statusBarUsers = ref<UserIdentityItem[]>([])
 const statusBarUsersState = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
 const view = new URLSearchParams(window.location.search).get('view') ?? 'personal'
@@ -755,6 +789,8 @@ let floatingWindowInitialized = false
 let checkingPlatformUpdate = false
 let adminRefreshEpoch = 0
 let statusBarUsersRequestEpoch = 0
+const personalTpsCache = createTpsWindowCache()
+const globalTpsCache = createTpsWindowCache()
 let collapsedDragStarted = false
 let collapsedDragStartAt = 0
 
@@ -809,14 +845,27 @@ const statusBarUserPlaceholder = computed(() => {
   if (statusBarUsersState.value === 'ready' && statusBarUserOptions.value.length === 0) return '暂无可选用户'
   return '请选择用户'
 })
+const selectedTpsUserLabel = computed(() => {
+  const userId = settings.value.statusBarUserId
+  if (userId === null) return '请在设置中选择用户'
+  const user = (adminMetrics.value.userIdentities ?? []).find((item) => item.id === userId)
+  return user ? formatUserIdentityLabel(user) : `用户 #${userId}`
+})
 const draftStatusBarUserExists = computed(() => draft.statusBarUserId === null
   || statusBarUserOptions.value.some((user) => user.id === draft.statusBarUserId))
 const draftStatusBarItems = computed(() => buildStatusBarDisplayItems(
   draft,
   adminMetrics.value,
-  draft.statusBarUserId === settings.value.statusBarUserId ? selectedUserUsage.value : null
+  draft.statusBarUserId === settings.value.statusBarUserId ? selectedUserUsage.value : null,
+  {
+    personal: draft.statusBarUserId === settings.value.statusBarUserId ? personalTpsMetric.value : createTpsMetric(5),
+    global: globalTpsMetric.value
+  }
 ))
-const statusBarItems = computed(() => buildStatusBarDisplayItems(settings.value, adminMetrics.value, selectedUserUsage.value))
+const statusBarItems = computed(() => buildStatusBarDisplayItems(settings.value, adminMetrics.value, selectedUserUsage.value, {
+  personal: personalTpsMetric.value,
+  global: globalTpsMetric.value
+}))
 const filteredPoolAccountDetails = computed(() => {
   if (selectedAccountStatus.value === 'all') return adminMetrics.value.poolAccountDetails
   return adminMetrics.value.poolAccountDetails.filter((item) => item.status === selectedAccountStatus.value)
@@ -876,8 +925,15 @@ const platformUpdatedText = computed(() => {
 const updateBusy = computed(() => updateState.value === 'checking' || updateState.value === 'downloading')
 
 async function refreshAll() {
-  if (!hasAdmin.value && !hasPersonal.value) {
+  if (!hasAdmin.value) {
+    adminRefreshEpoch += 1
     selectedUserUsage.value = null
+    personalTpsMetric.value = createTpsMetric(5)
+    globalTpsMetric.value = createTpsMetric(1440)
+    resetTpsWindowCache(personalTpsCache)
+    resetTpsWindowCache(globalTpsCache)
+  }
+  if (!hasAdmin.value && !hasPersonal.value) {
     await updateTrayStatus()
     return
   }
@@ -928,25 +984,44 @@ async function refreshAdmin() {
     poolGroupNames: settings.value.poolGroupNames,
     includeUserIdentities: !isSettingsView
   })
-  const selectedUserId = settings.value.statusBarMetrics.includes('selectedUserUsage')
-    ? settings.value.statusBarUserId
+  const selectedUserId = settings.value.statusBarUserId
+  const selectedUsageUserId = settings.value.statusBarMetrics.includes('selectedUserUsage')
+    ? selectedUserId
     : null
-  const selectedUserRequest = selectedUserId === null
+  const selectedUserRequest = selectedUsageUserId === null
     ? Promise.resolve(null)
     : fetchAdminUserModelUsage({
         baseUrl: settings.value.sub2apiBaseUrl,
         apiKey: settings.value.adminApiKey
-      }, selectedUserId).catch(() => null)
+      }, selectedUsageUserId).catch(() => null)
 
-  const [nextAdminMetrics, selectedUserModels] = await Promise.all([adminRequest, selectedUserRequest])
+  const needsPersonalTps = isPlatformView || settings.value.statusBarMetrics.includes('personalTps')
+  const needsGlobalTps = isPlatformView || settings.value.statusBarMetrics.includes('globalTps')
+  personalTpsMetric.value = !needsPersonalTps || selectedUserId === null ? createTpsMetric(5) : loadingTpsMetric(5)
+  globalTpsMetric.value = needsGlobalTps ? loadingTpsMetric(1440) : createTpsMetric(1440)
+  const personalTpsRequest = !needsPersonalTps || selectedUserId === null
+    ? Promise.resolve(createTpsMetric(5))
+    : fetchTpsWindow(5, selectedUserId, personalTpsCache).catch((error) => errorTpsMetric(error, 5))
+  const globalTpsRequest = needsGlobalTps
+    ? fetchTpsWindow(1440, undefined, globalTpsCache).catch((error) => errorTpsMetric(error, 1440))
+    : Promise.resolve(createTpsMetric(1440))
+
+  const [nextAdminMetrics, selectedUserModels, nextPersonalTps, nextGlobalTps] = await Promise.all([
+    adminRequest,
+    selectedUserRequest,
+    personalTpsRequest,
+    globalTpsRequest
+  ])
   if (refreshEpoch !== adminRefreshEpoch) return
   adminMetrics.value = nextAdminMetrics
-  if (selectedUserId !== null && selectedUserModels !== null) {
+  personalTpsMetric.value = nextPersonalTps
+  globalTpsMetric.value = nextGlobalTps
+  if (selectedUsageUserId !== null && selectedUserModels !== null) {
     selectedUserUsage.value = {
       ...aggregateUserModelUsage(selectedUserModels)
     }
-  } else if (selectedUserId !== null) {
-    const rankingUsage = nextAdminMetrics.userRanking.find((item) => item.userId === selectedUserId)
+  } else if (selectedUsageUserId !== null) {
+    const rankingUsage = nextAdminMetrics.userRanking.find((item) => item.userId === selectedUsageUserId)
     selectedUserUsage.value = rankingUsage
       ? { tokens: rankingUsage.tokens, actualCost: rankingUsage.actualCost }
       : null
@@ -957,6 +1032,30 @@ async function refreshAdmin() {
   const expandedUsers = adminMetrics.value.userRanking.filter((item) => isRankingUserExpanded(item))
   void Promise.allSettled(expandedUsers.map((item) => loadRankingUserModels(item, true)))
   if (rankingView.value === 'models') void loadModelRanking()
+}
+
+async function fetchTpsWindow(
+  windowMinutes: TpsWindowMinutes,
+  userId: number | undefined,
+  cache: ReturnType<typeof createTpsWindowCache>
+): Promise<TpsMetric> {
+  const now = new Date()
+  const baseUrl = settings.value.sub2apiBaseUrl.trim()
+  const apiKey = settings.value.adminApiKey.trim()
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'
+  const cacheKey = `${baseUrl}\n${apiKey}\n${userId ?? 'global'}\n${windowMinutes}`
+  return loadTpsMetricWindow({
+    windowMinutes,
+    userId,
+    cache,
+    cacheKey,
+    now,
+    timezone,
+    fetchPage: (query) => fetchAdminUsagePage({
+      baseUrl,
+      apiKey
+    }, query)
+  })
 }
 
 async function loadStatusBarUsers() {
@@ -1469,6 +1568,23 @@ function formatUserIdentityLabel(user: UserIdentityItem, includeEmail = true): s
   if (!includeEmail) return username || `用户 #${user.id}`
   if (includeEmail && username && email) return `${username}（${email}）`
   return username || email || `用户 #${user.id}`
+}
+
+function formatTpsValue(metric: TpsMetric): string {
+  return metric.state === 'ready' && metric.value !== null ? `${metric.value.toFixed(1)} TPS` : '-- TPS'
+}
+
+function formatTpsDetail(metric: TpsMetric, requiresUser = false): string {
+  if (requiresUser && settings.value.statusBarUserId === null) return '请先选择个人指标用户'
+  if (metric.state === 'loading') return '正在计算...'
+  if (metric.state === 'error') return '数据加载失败'
+  if (metric.state === 'incomplete') return '数据超过 1 万条，无法完整统计'
+  if (metric.state === 'empty') return '统计窗口内暂无有效请求'
+  const updatedAt = metric.updatedAt ? new Date(metric.updatedAt) : null
+  const time = updatedAt && Number.isFinite(updatedAt.getTime())
+    ? updatedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+    : '--:--'
+  return `${metric.sampleCount} 条样本 · ${time} 更新`
 }
 
 async function testPersonalToken() {

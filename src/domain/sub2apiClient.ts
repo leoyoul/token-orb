@@ -50,6 +50,20 @@ export interface AdminMonitorConfig {
   includeUserIdentities?: boolean
 }
 
+export interface AdminUsageQuery {
+  page: number
+  pageSize?: number
+  startDate: string
+  endDate: string
+  timezone: string
+  userId?: number
+}
+
+export interface AdminUsagePage {
+  items: unknown[]
+  total: number | null
+}
+
 export async function fetchSub2apiMetrics(config: Sub2apiConfig): Promise<TokenOrbMetrics> {
   const baseUrl = normalizeBaseUrl(config.baseUrl)
   const headers = buildSub2apiHeaders(config.token)
@@ -146,6 +160,30 @@ export async function fetchAdminUsers(
   const headers = buildAdminApiKeyHeaders(config.apiKey)
   const payload = await requestJson(`${baseUrl}/api/v1/admin/users?page=1&page_size=200`, headers)
   return parseUsers(payload)
+}
+
+export async function fetchAdminUsagePage(
+  config: Pick<AdminMonitorConfig, 'baseUrl' | 'apiKey'>,
+  query: AdminUsageQuery
+): Promise<AdminUsagePage> {
+  const baseUrl = normalizeBaseUrl(config.baseUrl)
+  const headers = buildRealtimeHeaders(buildAdminApiKeyHeaders(config.apiKey))
+  const params = new URLSearchParams({
+    page: String(query.page),
+    page_size: String(query.pageSize ?? 200),
+    sort_by: 'created_at',
+    sort_order: 'desc',
+    start_date: query.startDate,
+    end_date: query.endDate,
+    timezone: query.timezone,
+    exact_total: 'false'
+  })
+  if (query.userId !== undefined) params.set('user_id', String(query.userId))
+  const payload = await requestJson(buildRealtimeUrl(`${baseUrl}/api/v1/admin/usage?${params}`), headers)
+  return {
+    items: readItems(payload),
+    total: readPaginationTotal(payload)
+  }
 }
 
 export async function fetchAdminUserModelUsage(
@@ -330,6 +368,15 @@ function readFiniteNumber(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null
   }
   return null
+}
+
+function readPaginationTotal(payload: unknown): number | null {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return null
+  const root = payload as Record<string, unknown>
+  const data = typeof root.data === 'object' && root.data !== null && !Array.isArray(root.data)
+    ? root.data as Record<string, unknown>
+    : root
+  return readFiniteNumber(data.total ?? data.total_count ?? root.total)
 }
 
 async function requestJson(
