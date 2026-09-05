@@ -73,12 +73,12 @@ export function buildStatusBarDisplayItems(
         },
     personalTps: {
       key: 'personalTps',
-      topText: '个人 5m',
+      topText: '个人 5次',
       bottomText: formatTps(tpsMetrics?.personal.value ?? null)
     },
     globalTps: {
       key: 'globalTps',
-      topText: '全局 24h',
+      topText: '全局 昨日',
       bottomText: formatTps(tpsMetrics?.global.value ?? null)
     }
   }

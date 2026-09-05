@@ -173,11 +173,11 @@ export async function fetchAdminUsagePage(
     page_size: String(query.pageSize ?? 200),
     sort_by: 'created_at',
     sort_order: 'desc',
-    start_date: query.startDate,
-    end_date: query.endDate,
     timezone: query.timezone,
     exact_total: 'false'
   })
+  if (query.startDate) params.set('start_date', query.startDate)
+  if (query.endDate) params.set('end_date', query.endDate)
   if (query.userId !== undefined) params.set('user_id', String(query.userId))
   const payload = await requestJson(buildRealtimeUrl(`${baseUrl}/api/v1/admin/usage?${params}`), headers)
   return {

@@ -1,5 +1,5 @@
-import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App.vue'
 import { settingsStorageKey, type AppSettings } from '@/domain/settings'
 import { fetchAdminModelUsageRanking, fetchAdminModelUserUsage, fetchAdminMonitorMetrics, fetchAdminUsagePage, fetchAdminUserModelUsage, fetchAdminUsers, fetchSub2apiMetrics } from '@/domain/sub2apiClient'
@@ -15,7 +15,7 @@ const { checkForAvailableUpdate, emitTauriEvent, getPlatformUpdateCheckListener,
   const getAppVersion = vi.fn(async () => '0.4.3')
   const openReleaseNotes = vi.fn(async () => undefined)
   const emitTauriEvent = vi.fn(async () => undefined)
-  const invokeTauriCommand = vi.fn(async () => undefined)
+  const invokeTauriCommand = vi.fn<(...args: unknown[]) => Promise<unknown>>(async () => undefined)
   const listenTauriEvent = vi.fn(async (eventName: string, listener: () => void) => {
     if (eventName === 'token-orb-settings-updated') {
       settingsUpdatedListener = listener
@@ -146,6 +146,11 @@ const baseSettings: AppSettings = {
   refreshSeconds: 10
 }
 
+enableAutoUnmount(afterEach)
+afterEach(() => {
+  vi.clearAllTimers()
+})
+
 describe('App settings sync', () => {
   beforeEach(() => {
     vi.useFakeTimers()
@@ -204,10 +209,11 @@ describe('App settings sync', () => {
     })
     vi.mocked(fetchAdminUsagePage).mockImplementation(async (_config, query) => ({
       items: [{
-        id: query.userId === 7 ? 'personal' : 'global',
-        created_at: '2026-09-05T11:59:00.000Z',
+        id: 'global',
+        user_id: 7,
+        created_at: query.userId === undefined ? '2026-09-04T11:59:00.000Z' : '2026-09-05T11:59:00.000Z',
         status_code: 200,
-        output_tokens: query.userId === 7 ? 120 : 300,
+        output_tokens: 300,
         duration_ms: 12_000,
         first_token_ms: 2_000
       }],
@@ -221,7 +227,7 @@ describe('App settings sync', () => {
     const cards = wrapper.findAll('.tps-card')
     expect(cards).toHaveLength(2)
     expect(cards[0].text()).toContain('个人 TPS')
-    expect(cards[0].text()).toContain('12.0 TPS')
+    expect(cards[0].text()).toContain('30.0 TPS')
     expect(cards[0].text()).toContain('测试用户（user@example.com）')
     expect(cards[1].text()).toContain('全局 TPS')
     expect(cards[1].text()).toContain('30.0 TPS')
@@ -240,6 +246,55 @@ describe('App settings sync', () => {
     expect(wrapper.find('select[name="status-bar-user-id"]').exists()).toBe(true)
     expect(wrapper.find('input[value="personalTps"]').exists()).toBe(true)
     expect(wrapper.find('input[value="globalTps"]').exists()).toBe(true)
+  })
+
+  it('keeps personal TPS low-frequency and fetches the daily global only once', async () => {
+    vi.setSystemTime(new Date('2026-09-05T12:00:00Z'))
+    const selected = { ...baseSettings, statusBarUserId: 7 }
+    localStorage.setItem(settingsStorageKey, JSON.stringify(selected))
+    vi.mocked(fetchAdminUsagePage).mockImplementation(async () => ({
+      items: [7, 8].map((userId) => ({
+        id: userId, user_id: userId, created_at: new Date().toISOString(),
+        request_type: 'stream', output_tokens: userId * 10, duration_ms: 2000, first_token_ms: 1000
+      })), total: 2
+    }))
+    const wrapper = mount(App)
+    await flushPromises()
+    expect(fetchAdminUsagePage).toHaveBeenCalledTimes(2)
+    localStorage.setItem(settingsStorageKey, JSON.stringify({ ...selected, statusBarUserId: 8 }))
+    window.dispatchEvent(new StorageEvent('storage', { key: settingsStorageKey, newValue: 'changed' }))
+    await flushPromises()
+    expect(wrapper.findAll('.tps-card')[0].text()).toContain('80.0 TPS')
+    expect(fetchAdminUsagePage).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(600_000)
+    expect(vi.mocked(fetchAdminUsagePage).mock.calls.length).toBeLessThanOrEqual(12)
+    expect(vi.mocked(fetchAdminUsagePage).mock.calls.filter(([, query]) => query.userId === undefined)).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('does not request TPS in a hidden main window with both status metrics disabled', async () => {
+    window.history.replaceState({}, '', '/?view=personal')
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: {} })
+    localStorage.setItem(settingsStorageKey, JSON.stringify(baseSettings))
+    const wrapper = mount(App)
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(600_000)
+    expect(fetchAdminUsagePage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('recovers native TPS demand from window visibility when no cross-window event arrives', async () => {
+    window.history.replaceState({}, '', '/?view=personal')
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: {} })
+    localStorage.setItem(settingsStorageKey, JSON.stringify({ ...baseSettings, statusBarUserId: 7 }))
+    invokeTauriCommand.mockImplementation(async (command?: unknown) => command === 'platform_is_visible' ? true : undefined)
+    const wrapper = mount(App)
+    await flushPromises()
+    expect(vi.mocked(fetchAdminUsagePage).mock.calls.map(([, query]) => query.userId)).toEqual([7, undefined])
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(vi.mocked(fetchAdminUsagePage).mock.calls.filter(([, query]) => query.userId === undefined)).toHaveLength(1)
+    wrapper.unmount()
+    invokeTauriCommand.mockImplementation(async () => undefined)
   })
 
   it('uses a 410px platform window to keep the account summary on one line', async () => {
@@ -431,7 +486,7 @@ describe('App settings sync', () => {
   })
 
   it('publishes valid platform metrics and falls back to the matching user ranking', async () => {
-    window.history.replaceState({}, '', '/?view=platform')
+    window.history.replaceState({}, '', '/?view=personal')
     Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: {} })
     localStorage.setItem(settingsStorageKey, JSON.stringify({
       ...baseSettings,

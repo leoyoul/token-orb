@@ -58,8 +58,8 @@ describe('status bar display', () => {
     })
 
     expect(items).toEqual([
-      { key: 'globalTps', topText: '全局 24h', bottomText: '-- TPS' },
-      { key: 'personalTps', topText: '个人 5m', bottomText: '42.3 TPS' }
+      { key: 'globalTps', topText: '全局 昨日', bottomText: '-- TPS' },
+      { key: 'personalTps', topText: '个人 5次', bottomText: '42.3 TPS' }
     ])
   })
 })
