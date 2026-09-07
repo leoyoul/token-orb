@@ -1110,10 +1110,16 @@ function hydrateTpsWindowCache(
   cache.key = userId === undefined && windowMinutes === 1440
     ? `${tpsCacheFingerprint}:global:1440:${bucket.periodDate ?? ''}`
     : tpsRuntimeCacheKey(windowMinutes, userId)
+  const records = userId === undefined
+    ? [...bucket.records]
+    : bucket.records.filter((record) => String(record.user_id) === String(userId))
+  // The personal bucket is shared by all selected users. A timestamp from a
+  // different user must not suppress the first fetch for the current user.
   cache.initialized = bucket.lastIncrementalAt !== null
-  cache.complete = bucket.lastCompleteAt !== null
-  cache.capped = bucket.capped === true
-  cache.records = [...bucket.records]
+    && (userId === undefined || records.length > 0)
+  cache.complete = cache.initialized && bucket.lastCompleteAt !== null
+  cache.capped = cache.initialized && bucket.capped === true
+  cache.records = records
 }
 
 function syncTpsRuntimeContext() {
@@ -1148,10 +1154,12 @@ function syncTpsRuntimeContext() {
     lastIncrementalAt: persistedTpsCache.global.lastIncrementalAt ? new Date(persistedTpsCache.global.lastIncrementalAt) : null,
     lastCompleteAt: persistedTpsCache.global.lastCompleteAt ? new Date(persistedTpsCache.global.lastCompleteAt) : null
   })
-  tpsScheduler.hydrate('personal', {
-    lastIncrementalAt: persistedTpsCache.personal.lastIncrementalAt ? new Date(persistedTpsCache.personal.lastIncrementalAt) : null,
-    lastCompleteAt: persistedTpsCache.personal.lastCompleteAt ? new Date(persistedTpsCache.personal.lastCompleteAt) : null
-  })
+  if (personalTpsCache.initialized) {
+    tpsScheduler.hydrate('personal', {
+      lastIncrementalAt: persistedTpsCache.personal.lastIncrementalAt ? new Date(persistedTpsCache.personal.lastIncrementalAt) : null,
+      lastCompleteAt: persistedTpsCache.personal.lastCompleteAt ? new Date(persistedTpsCache.personal.lastCompleteAt) : null
+    })
+  }
 }
 
 function refreshTpsMetricsFromCache() {
